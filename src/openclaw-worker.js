@@ -90,7 +90,19 @@ function getOpenClawCredentialsPath() {
 }
 
 function getBundledSkillsPath() {
-  return path.join(__dirname, 'skills');
+  const candidates = [
+    process.resourcesPath ? path.join(process.resourcesPath, 'skills') : null,
+    process.resourcesPath ? path.join(process.resourcesPath, 'app.asar.unpacked', 'src', 'skills') : null,
+    path.join(__dirname, 'skills'),
+  ].filter(Boolean);
+
+  for (const candidate of candidates) {
+    if (fs.existsSync(candidate)) {
+      return candidate;
+    }
+  }
+
+  throw new Error(`Khong tim thay thu muc skills de copy. Da thu cac path: ${candidates.join(', ')}`);
 }
 
 function readJsonFile(filePath) {
@@ -125,10 +137,6 @@ function copyBundledSkillsToWorkspace() {
   const sourcePath = getBundledSkillsPath();
   const workspacePath = getConfiguredOpenClawWorkspacePath();
   const destinationPath = path.join(workspacePath, 'skills');
-
-  if (!fs.existsSync(sourcePath)) {
-    throw new Error(`Khong tim thay thu muc skills de copy: ${sourcePath}`);
-  }
 
   fs.mkdirSync(workspacePath, { recursive: true });
   fs.cpSync(sourcePath, destinationPath, {
