@@ -1,0 +1,31 @@
+echo "========================================"
+echo "   Đang thiết lập OpenClaw FULL RIGHTS   "
+echo "        (Sandbox OFF + Elevated)         "
+echo "========================================"
+
+# Tắt sandbox - Agent chạy trực tiếp trên host
+echo "[+] Tắt sandbox..."
+openclaw config set agents.defaults.sandbox.mode off
+
+# Bật full tools
+echo "[+] Bật full tools profile..."
+openclaw config set tools.profile full
+
+echo "[+] Bật full exec security..."
+openclaw config set tools.exec.security full
+
+echo "[+] Tắt hỏi approval khi chạy lệnh..."
+openclaw config set tools.exec.ask off
+
+# Bật elevated mode (quyền cao nhất)
+echo "[+] Bật elevated mode..."
+openclaw config set tools.elevated.enabled true
+
+# Restart OpenClaw để áp dụng
+echo "[+] Restarting OpenClaw..."
+openclaw restart
+
+echo "========================================"
+echo "✅ HOÀN TẤT! OpenClaw đã được set full quyền."
+echo "========================================"
+echo "Bạn có thể kiểm tra bằng lệnh: openclaw status"

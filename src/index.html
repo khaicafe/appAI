@@ -1,0 +1,556 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+  <meta charset="UTF-8" />
+  <meta http-equiv="X-UA-Compatible" content="IE=edge" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <link rel="icon" href="./assets/openclaw.ico" sizes="any" />
+  <title>OpenClaw Controller</title>
+  <style>
+    body {
+      margin: 0;
+      font-family: Arial, sans-serif;
+      background: #121212;
+      color: #e6e6e6;
+    }
+    .app-shell {
+      display: grid;
+      grid-template-columns: 280px minmax(0, 1fr);
+      min-height: 100vh;
+    }
+    .panel {
+      padding: 24px;
+      border-right: 1px solid #333;
+      background: #181818;
+      min-width: 0;
+    }
+    .content {
+      padding: 24px;
+      display: grid;
+      grid-template-rows: auto 1fr;
+      gap: 20px;
+      min-width: 0;
+    }
+    h1 {
+      margin-top: 0;
+      font-size: 1.7rem;
+      text-align: center;
+    }
+    .status-stack {
+      margin: 16px 0 20px;
+      display: grid;
+      gap: 10px;
+    }
+    .tab-list {
+      display: grid;
+      grid-template-columns: 1fr;
+      gap: 8px;
+      margin: 18px 0 16px;
+      padding: 4px;
+      border-radius: 12px;
+      background: #101010;
+      border: 1px solid #2a2a2a;
+    }
+    .tab-button {
+      margin: 0;
+      background: transparent;
+      color: #94a3b8;
+      border: 1px solid transparent;
+      padding: 12px 14px;
+    }
+    .tab-button.is-active {
+      background: #0f766e;
+      color: #ffffff;
+      border-color: #14b8a6;
+    }
+    .tab-panel {
+      display: none;
+    }
+    .tab-panel.is-active {
+      display: block;
+      min-width: 0;
+    }
+    #controllerTabPanel.is-active {
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+      min-width: 0;
+    }
+    .tab-content-shell {
+      padding: 20px;
+      border: 1px solid #2b2b2b;
+      border-radius: 14px;
+      background: #151515;
+    }
+    .tab-content-shell h2 {
+      margin: 0 0 16px;
+      font-size: 1.15rem;
+    }
+    .button-stack {
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+      min-width: 0;
+      width: 100%;
+      align-items: stretch;
+    }
+    .telegram-connect-panel {
+      margin-top: 18px;
+      padding-top: 18px;
+      border-top: 1px solid #2b2b2b;
+    }
+    .telegram-checkbox-row {
+      display: flex;
+      align-items: flex-start;
+      gap: 10px;
+      margin: 0 0 12px;
+      padding: 12px 14px;
+      border-radius: 10px;
+      border: 1px solid #243041;
+      background: #10161d;
+      color: #cbd5e1;
+    }
+    .telegram-checkbox-row input[type="checkbox"] {
+      width: auto;
+      margin: 3px 0 0;
+      accent-color: #2563eb;
+      flex: 0 0 auto;
+    }
+    .telegram-checkbox-copy {
+      display: grid;
+      gap: 4px;
+      line-height: 1.5;
+      font-size: 13px;
+    }
+    .telegram-checkbox-copy strong {
+      color: #e2e8f0;
+      font-size: 13px;
+    }
+    .telegram-pairing-status {
+      margin-top: 12px;
+      padding: 12px 14px;
+      border-radius: 10px;
+      border: 1px solid #243041;
+      background: #10161d;
+      color: #cbd5e1;
+      line-height: 1.5;
+      font-size: 13px;
+    }
+    .telegram-pairing-status.is-success {
+      background: #0f2d20;
+      border-color: #166534;
+      color: #86efac;
+    }
+    .telegram-pairing-status.is-warning {
+      background: #2a1b0f;
+      border-color: #9a3412;
+      color: #fdba74;
+    }
+    .telegram-pairing-status.is-info {
+      background: #10161d;
+      border-color: #243041;
+      color: #cbd5e1;
+    }
+    .telegram-connect-panel[hidden] {
+      display: none;
+    }
+    .button-stack > button {
+      display: block;
+      width: 100%;
+      margin: 0;
+      flex: 0 0 auto;
+    }
+    button {
+      width: 100%;
+      padding: 14px 16px;
+      margin: 8px 0;
+      border: none;
+      border-radius: 8px;
+      background: #2d7ff9;
+      color: #fff;
+      font-size: 1rem;
+      cursor: pointer;
+    }
+    button:disabled {
+      cursor: wait;
+      opacity: 0.72;
+    }
+    button.secondary {
+      background: #444;
+    }
+    .button-face {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+      min-height: 1.2em;
+      width: 100%;
+      min-width: 0;
+    }
+    .button-face > span:first-child {
+      flex: 1 1 auto;
+      min-width: 0;
+      text-align: center;
+      overflow-wrap: anywhere;
+    }
+    .loading-dots {
+      display: none;
+      align-items: flex-end;
+      gap: 4px;
+      height: 12px;
+    }
+    .loading-dots span {
+      width: 6px;
+      height: 6px;
+      border-radius: 999px;
+      background: rgba(255, 255, 255, 0.95);
+      animation: install-dot-bounce 0.9s infinite ease-in-out;
+    }
+    .loading-dots span:nth-child(2) {
+      animation-delay: 0.15s;
+    }
+    .loading-dots span:nth-child(3) {
+      animation-delay: 0.3s;
+    }
+    button.is-loading .loading-dots {
+      display: inline-flex;
+    }
+    @keyframes install-dot-bounce {
+      0%, 80%, 100% {
+        transform: translateY(0);
+        opacity: 0.45;
+      }
+      40% {
+        transform: translateY(-4px);
+        opacity: 1;
+      }
+    }
+    input,
+    select {
+      width: 100%;
+      padding: 12px;
+      border-radius: 8px;
+      border: 1px solid #444;
+      background: #0f0f0f;
+      color: #fff;
+      margin-top: 8px;
+      box-sizing: border-box;
+    }
+    .field-group {
+      margin: 12px 0 8px;
+    }
+    .field-group label {
+      display: block;
+      margin-bottom: 6px;
+      font-size: 0.92rem;
+      color: #c7d2fe;
+    }
+    .field-hint {
+      margin-top: 6px;
+      font-size: 12px;
+      line-height: 1.4;
+      color: #94a3b8;
+    }
+    .guide-card {
+      display: grid;
+      gap: 14px;
+    }
+    .guide-intro {
+      margin: 0;
+      color: #cbd5e1;
+      line-height: 1.6;
+    }
+    .guide-step {
+      padding: 16px;
+      border-radius: 12px;
+      background: #10161d;
+      border: 1px solid #243041;
+    }
+    .guide-step h3 {
+      margin: 0 0 8px;
+      font-size: 1rem;
+      color: #e2e8f0;
+    }
+    .guide-step p {
+      margin: 0;
+      color: #cbd5e1;
+      line-height: 1.6;
+    }
+    .guide-link {
+      color: #67e8f9;
+      text-decoration: none;
+      font-weight: 600;
+    }
+    .guide-link:hover {
+      text-decoration: underline;
+    }
+    .guide-note {
+      padding: 14px 16px;
+      border-radius: 12px;
+      background: #1b1a10;
+      border: 1px solid #4d4420;
+      color: #fef08a;
+      line-height: 1.6;
+    }
+    .saved-key-status {
+      display: grid;
+      gap: 8px;
+      margin: 0 0 16px;
+      padding: 14px;
+      border-radius: 12px;
+      background: #10161d;
+      border: 1px solid #243041;
+    }
+    .saved-key-status-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      font-size: 13px;
+    }
+    .saved-key-status-label {
+      color: #cbd5e1;
+    }
+    .saved-key-badge {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-width: 84px;
+      padding: 4px 10px;
+      border-radius: 999px;
+      font-size: 12px;
+      font-weight: 600;
+      background: #3f1d1d;
+      color: #fca5a5;
+      border: 1px solid #7f1d1d;
+    }
+    .saved-key-badge.is-present {
+      background: #0f2d20;
+      color: #86efac;
+      border-color: #166534;
+    }
+    .log-section h2 {
+      margin: 0 0 12px;
+    }
+    #log {
+      height: calc(100vh - 300px);
+      overflow-y: auto;
+      overflow-x: auto;
+      background: #111;
+      border: 1px solid #333;
+      border-radius: 10px;
+      padding: 16px;
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+      word-break: break-word;
+      line-height: 1.5;
+      font-family: Consolas, "Courier New", monospace;
+      font-size: 13px;
+      min-width: 0;
+    }
+    #status {
+      padding: 12px;
+      border-radius: 8px;
+      background: #12261b;
+      border: 1px solid #274b38;
+      color: #9bdc28;
+    }
+    #gatewayInfo {
+      padding: 12px;
+      background: #0a3d0a;
+      border: 1px solid #2d7f1f;
+      border-radius: 8px;
+      display: none;
+    }
+    #gatewayInfo h3 {
+      margin: 0 0 8px;
+      color: #4ade80;
+      font-size: 0.95rem;
+    }
+    #gatewayUrl,
+    #gatewayPid {
+      font-size: 12px;
+      color: #86efac;
+      margin: 4px 0;
+      word-break: break-all;
+    }
+  </style>
+</head>
+<body>
+  <div class="app-shell">
+    <div class="panel">
+      <h1>OpenClaw</h1>
+      <div class="status-stack">
+        <div id="status">Sẵn sàng</div>
+        <div id="gatewayInfo">
+          <h3>Gateway Info</h3>
+          <div id="gatewayUrl"></div>
+          <div id="gatewayPid"></div>
+        </div>
+      </div>
+      <div class="tab-list" role="tablist" aria-label="OpenClaw sections">
+        <button id="controllerTabButton" class="tab-button is-active" type="button" role="tab" aria-selected="true" aria-controls="controllerTabPanel">Controller</button>
+        <button id="configTabButton" class="tab-button" type="button" role="tab" aria-selected="false" aria-controls="configTabPanel">Cấu hình key</button>
+        <button id="guideTabButton" class="tab-button" type="button" role="tab" aria-selected="false" aria-controls="guideTabPanel">Hướng dẫn</button>
+      </div>
+    </div>
+    <div class="content">
+      <div class="tab-content-shell">
+        <section id="controllerTabPanel" class="tab-panel is-active" role="tabpanel" aria-labelledby="controllerTabButton">
+          <h2>Controller</h2>
+          <div class="button-stack">
+            <button id="stopButton" class="secondary">
+              <span class="button-face">
+                <span id="stopButtonLabel">Dừng</span>
+                <span class="loading-dots" aria-hidden="true">
+                  <span></span>
+                  <span></span>
+                  <span></span>
+                </span>
+              </span>
+            </button>
+            <button id="runGatewayButton" class="secondary">
+              <span class="button-face">
+                <span id="runGatewayButtonLabel">Chạy Gateway</span>
+                <span class="loading-dots" aria-hidden="true">
+                  <span></span>
+                  <span></span>
+                  <span></span>
+                </span>
+              </span>
+            </button>
+            <button id="installButton" style="background: #0f766e;">
+              <span class="button-face">
+                <span id="installButtonLabel">Cài đặt OpenClaw</span>
+                <span class="loading-dots" aria-hidden="true">
+                  <span></span>
+                  <span></span>
+                  <span></span>
+                </span>
+              </span>
+            </button>
+            <button id="setFullRightsButton" style="background: linear-gradient(135deg, #b45309, #ea580c);">
+              <span class="button-face">
+                <span id="setFullRightsButtonLabel">Set Full Quyền</span>
+                <span class="loading-dots" aria-hidden="true">
+                  <span></span>
+                  <span></span>
+                  <span></span>
+                </span>
+              </span>
+            </button>
+            <button id="uninstallButton" style="background: #ef4444;">
+              <span class="button-face">
+                <span id="uninstallButtonLabel">Gỡ bỏ OpenClaw</span>
+                <span class="loading-dots" aria-hidden="true">
+                  <span></span>
+                  <span></span>
+                  <span></span>
+                </span>
+              </span>
+            </button>
+          </div>
+          <div id="telegramConnectPanel" class="telegram-connect-panel" hidden>
+            <button id="connectTelegramButton" style="background: #2563eb;">
+              <span class="button-face">
+                <span id="connectTelegramButtonLabel">Connect Telegram</span>
+                <span class="loading-dots" aria-hidden="true">
+                  <span></span>
+                  <span></span>
+                  <span></span>
+                </span>
+              </span>
+            </button>
+            <div id="telegramPairingFields" hidden>
+              <div class="field-group">
+                <label for="telegramPairingCode">Telegram pairing code</label>
+                <input id="telegramPairingCode" type="text" placeholder="Nhập pairing code Telegram" autocomplete="off" />
+                <div class="field-hint">Bấm Connect Telegram để tải danh sách pairing đang chờ. Sau đó nhập code và bấm lại nút để approve bằng lệnh openclaw pairing approve telegram &lt;code&gt;.</div>
+              </div>
+            </div>
+            <div id="telegramPairingStatus" class="telegram-pairing-status is-info">Telegram chưa được kiểm tra trạng thái pairing.</div>
+          </div>
+        </section>
+        <section id="configTabPanel" class="tab-panel" role="tabpanel" aria-labelledby="configTabButton">
+          <h2>Cấu hình key</h2>
+          <div class="saved-key-status" aria-live="polite">
+            <div class="saved-key-status-row">
+              <span class="saved-key-status-label">OpenRouter key</span>
+              <span id="openrouterKeyStatus" class="saved-key-badge">Chưa có</span>
+            </div>
+            <div class="saved-key-status-row">
+              <span class="saved-key-status-label">Gemini key</span>
+              <span id="geminiKeyStatus" class="saved-key-badge">Chưa có</span>
+            </div>
+            <div class="saved-key-status-row">
+              <span class="saved-key-status-label">Telegram bot token</span>
+              <span id="telegramKeyStatus" class="saved-key-badge">Chưa có</span>
+            </div>
+          </div>
+          <div class="field-group" id="openrouterFieldGroup">
+            <label for="openrouterApiKey">OpenRouter API key</label>
+            <input id="openrouterApiKey" type="password" placeholder="Nhập OpenRouter API key trước khi cài đặt" autocomplete="off" />
+            <div class="field-hint">Nhập một trong hai key để cài. Nếu nhập key này app sẽ cấu hình OpenRouter với model mặc định là openrouter/qwen/qwen3.6-plus:free.</div>
+          </div>
+          <div class="field-group">
+            <label for="geminiApiKey">Gemini API key</label>
+            <input id="geminiApiKey" type="password" placeholder="Nhập Gemini API key trước khi cài đặt" autocomplete="off" />
+            <div class="field-hint">Hoặc nhập key này để app cấu hình Google Gemini với model mặc định là gemini-2.5-flash.</div>
+          </div>
+          <div class="field-group">
+            <label for="telegramBotToken">Telegram bot token</label>
+            <input id="telegramBotToken" type="password" placeholder="Nhập Telegram bot token nếu muốn bật channel Telegram" autocomplete="off" />
+            <div class="field-hint">Nếu có token, app sẽ bật `channels.telegram.enabled` và lưu `channels.telegram.botToken` vào OpenClaw.</div>
+          </div>
+          <button id="saveKeysButton" style="background: #1d4ed8;">
+            <span class="button-face">
+              <span id="saveKeysButtonLabel">Lưu key</span>
+              <span class="loading-dots" aria-hidden="true">
+                <span></span>
+                <span></span>
+                <span></span>
+              </span>
+            </span>
+          </button>
+        </section>
+        <section id="guideTabPanel" class="tab-panel" role="tabpanel" aria-labelledby="guideTabButton">
+          <h2>Hướng dẫn kết nối bot</h2>
+          <div class="guide-card">
+            <p class="guide-intro">Tab này dành cho người mới. Chỉ cần làm lần lượt từ trên xuống dưới, không cần biết OpenClaw hoạt động bên trong như thế nào.</p>
+            <div class="guide-step">
+              <h3>Bước 1: Chuẩn bị key</h3>
+              <p>Bạn cần ít nhất một key AI. Dễ nhất là dùng <a class="guide-link" href="https://openrouter.ai/keys" target="_blank" rel="noreferrer">OpenRouter API key</a> hoặc <a class="guide-link" href="https://aistudio.google.com/app/apikey" target="_blank" rel="noreferrer">Gemini API key</a>. Nếu muốn dùng Telegram bot thì vào <a class="guide-link" href="https://t.me/BotFather" target="_blank" rel="noreferrer">BotFather</a> để tạo một bot mới, sau đó BotFather sẽ trả về cho bạn một Telegram bot token và username của bot, ví dụ `@ten_bot_cua_ban`.</p>
+            </div>
+            <div class="guide-step">
+              <h3>Bước 2: Nhập key vào tab Cấu hình key</h3>
+              <p>Mở tab Cấu hình key, dán OpenRouter key hoặc Gemini key vào ô tương ứng. Nếu có Telegram bot token thì dán vào ô Telegram bot token. Sau đó bấm Lưu key để app ghi lại các key này cho những lần mở sau.</p>
+            </div>
+            <div class="guide-step">
+              <h3>Bước 3: Cài OpenClaw</h3>
+              <p>Chuyển sang tab Controller rồi bấm Cài đặt OpenClaw. App sẽ tự cài OpenClaw, cấu hình model mặc định, lưu provider và bật Telegram channel nếu bạn đã nhập bot token.</p>
+            </div>
+            <div class="guide-step">
+              <h3>Bước 4: Chạy Gateway</h3>
+              <p>Sau khi cài xong, bấm Chạy Gateway. Khi thành công, phần trạng thái sẽ báo gateway đang chạy và hiện URL cùng PID. Lúc này OpenClaw đã sẵn sàng nhận kết nối.</p>
+            </div>
+            <div class="guide-step">
+              <h3>Bước 5: Kết nối Telegram bot</h3>
+              <p>Trong tab Controller, bấm Connect Telegram một lần để app tải danh sách pairing Telegram đang chờ. Pairing code không phải lấy trong app này trước, mà lấy từ bot Telegram của bạn. Ở đây “bot của bạn” nghĩa là bot Telegram bạn đã tự tạo ở Bước 1 bằng BotFather. Hãy mở Telegram, tìm đúng username của bot đó, ví dụ `@ten_bot_cua_ban`, rồi nhắn cho bot một tin như `/start` hoặc một câu chào. Bot sẽ hiện pairing code cho bạn. Hãy copy đúng pairing code đó, quay lại app, dán vào ô Telegram pairing code, rồi bấm lại Connect Telegram để xác nhận.</p>
+            </div>
+            <div class="guide-step">
+              <h3>Bước 6: Nếu gặp lỗi</h3>
+              <p>Nhìn xuống phần Nhật ký ở cuối app. Tất cả bước cài đặt, chạy gateway và connect Telegram đều được ghi lại ở đó. Nếu app báo thiếu key, quay lại tab Cấu hình key để nhập lại rồi thử lại.</p>
+            </div>
+            <div class="guide-note">Mẹo: nếu bạn không biết nên chọn key nào, hãy dùng key nào bạn đã có sẵn. App chỉ cần một trong hai key OpenRouter hoặc Gemini để cài và chạy.</div>
+          </div>
+        </section>
+      </div>
+      <div id="logSection" class="log-section">
+        <h2>Nhật ký</h2>
+        <div id="log"></div>
+      </div>
+    </div>
+  </div>
+  <script src="renderer.js"></script>
+</body>
+</html>

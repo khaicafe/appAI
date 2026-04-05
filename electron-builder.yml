@@ -1,0 +1,29 @@
+appId: ai.openclaw.controller
+productName: OpenClaw Controller
+artifactName: ${productName}-${version}-${os}-${arch}.${ext}
+
+directories:
+  output: release
+  buildResources: resources
+
+files:
+  - src/**/*
+  - package.json
+
+asar: true
+compression: maximum
+
+win:
+  target:
+    - target: nsis
+      arch:
+        - x64
+  icon: resources/icon-256.png
+
+nsis:
+  oneClick: false
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: always
+  createStartMenuShortcut: true
+  shortcutName: OpenClaw Controller
+  runAfterFinish: true
