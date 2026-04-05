@@ -1,13 +1,14 @@
 {
   "name": "openclaw-controller",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "private": true,
   "description": "Electron app to control OpenClaw",
   "main": "src/main.js",
   "scripts": {
     "start": "electron .",
     "dist:win": "electron-builder --win nsis --x64",
-    "dist:win:signed": "node scripts/build-signed-win.js"
+    "dist:win:signed": "node scripts/build-signed-win.js",
+    "release:asset": "node scripts/upload-release-asset.js"
   },
   "devDependencies": {
     "electron": "^29.0.0",

@@ -764,6 +764,147 @@ async function isWingetInstalled() {
   }
 }
 
+function getPrereqInstallerDir() {
+  return path.join(os.tmpdir(), 'openclaw-controller-installers');
+}
+
+function getPrereqInstallerPath(fileName) {
+  fs.mkdirSync(getPrereqInstallerDir(), { recursive: true });
+  return path.join(getPrereqInstallerDir(), fileName);
+}
+
+async function resolveLatestNodeMsiUrl() {
+  const script = [
+    "$page = Invoke-WebRequest -UseBasicParsing 'https://nodejs.org/dist/latest-v24.x/';",
+    "$link = $page.Links | Where-Object { $_.href -match 'x64\\.msi$' } | Select-Object -First 1 -ExpandProperty href;",
+    "if (-not $link) { throw 'Khong tim thay Node.js x64 MSI trong latest-v24.x'; }",
+    "if ($link -match '^https?://') { Write-Output $link } else { Write-Output ('https://nodejs.org/dist/latest-v24.x/' + $link.TrimStart('/')) }",
+  ].join(' ');
+
+  const { stdout } = await runPowerShellCommand(script, {
+    logPrefix: 'Prereq',
+    streamStdout: false,
+    streamStderr: false,
+  });
+
+  return stdout.trim();
+}
+
+async function downloadFile(url, destinationPath, label) {
+  const script = [
+    `$ProgressPreference = 'SilentlyContinue';`,
+    `Invoke-WebRequest -UseBasicParsing -Uri ${escapePowerShellString(url)} -OutFile ${escapePowerShellString(destinationPath)};`,
+    `Write-Output ${escapePowerShellString(destinationPath)};`,
+  ].join(' ');
+
+  sendLog(`[Install] Dang tai ${label} tu ${url}`);
+  await runPowerShellCommand(script, {
+    logPrefix: label,
+    streamStdout: true,
+    streamStderr: true,
+  });
+}
+
+async function installWingetIfMissing() {
+  const alreadyInstalled = await isWingetInstalled();
+  if (alreadyInstalled) {
+    return { installed: false, method: 'existing' };
+  }
+
+  const vcLibsUrl = 'https://aka.ms/Microsoft.VCLibs.x64.14.00.Desktop.appx';
+  const bundleUrl = 'https://aka.ms/getwinget';
+  const vcLibsPath = getPrereqInstallerPath('Microsoft.VCLibs.x64.14.00.Desktop.appx');
+  const bundlePath = getPrereqInstallerPath('Microsoft.DesktopAppInstaller_8wekyb3d8bbwe.msixbundle');
+
+  sendLog('[Install] Khong tim thay winget. Dang thu cai App Installer de bo sung winget...');
+  await downloadFile(vcLibsUrl, vcLibsPath, 'Microsoft.VCLibs x64');
+  await downloadFile(bundleUrl, bundlePath, 'Microsoft App Installer');
+
+  const installScript = [
+    `$vcLibsPath = ${escapePowerShellString(vcLibsPath)};`,
+    `$bundlePath = ${escapePowerShellString(bundlePath)};`,
+    `try { Add-AppxPackage -Path $vcLibsPath -ErrorAction Stop; } catch { Write-Output ('Bo qua VCLibs: ' + $_.Exception.Message) }`,
+    `Add-AppxPackage -Path $bundlePath -ErrorAction Stop;`,
+    `Write-Output 'Winget installation command completed.';`,
+  ].join(' ');
+
+  await runPowerShellCommand(installScript, {
+    logPrefix: 'Winget',
+    streamStdout: true,
+    streamStderr: true,
+  });
+
+  await reloadProcessPathFromSystem();
+  const installed = await isWingetInstalled();
+  if (!installed) {
+    throw new Error('Da chay cai dat App Installer nhung van khong tim thay winget sau khi cai dat.');
+  }
+
+  sendLog('[Install] Da cai winget thanh cong.');
+  return {
+    installed: true,
+    method: 'app-installer',
+    vcLibsPath,
+    bundlePath,
+    vcLibsUrl,
+    bundleUrl,
+  };
+}
+
+async function installNodeWithoutWinget() {
+  const downloadUrl = await resolveLatestNodeMsiUrl();
+  const installerPath = getPrereqInstallerPath('node-lts-x64.msi');
+  await downloadFile(downloadUrl, installerPath, 'Node.js 24 LTS');
+
+  sendLog('[Install] Dang cai Node.js 24 LTS bang MSI...');
+  await runProcessCommand('msiexec.exe', ['/i', installerPath, '/qn', '/norestart'], {
+    logPrefix: 'Node.js 24 LTS',
+    streamStdout: true,
+    streamStderr: true,
+  });
+
+  await reloadProcessPathFromSystem();
+  const installedMajor = await getInstalledNodeMajorVersion();
+  if (installedMajor === null || installedMajor < 24) {
+    throw new Error('Da chay installer Node.js nhung khong phat hien duoc Node.js 24+ sau khi cai dat.');
+  }
+
+  return { method: 'direct-download', installerPath, downloadUrl };
+}
+
+async function installGitWithoutWinget() {
+  const downloadUrl = 'https://github.com/git-for-windows/git/releases/latest/download/Git-64-bit.exe';
+  const installerPath = getPrereqInstallerPath('git-64-bit.exe');
+  await downloadFile(downloadUrl, installerPath, 'Git');
+
+  sendLog('[Install] Dang cai Git bang installer chinh thuc...');
+  await runProcessCommand(installerPath, ['/VERYSILENT', '/NORESTART', '/NOCANCEL', '/SP-'], {
+    logPrefix: 'Git',
+    streamStdout: true,
+    streamStderr: true,
+  });
+
+  await reloadProcessPathFromSystem();
+  const installed = await isGitInstalled();
+  if (!installed) {
+    throw new Error('Da chay installer Git nhung van khong tim thay git --version sau khi cai dat.');
+  }
+
+  return { method: 'direct-download', installerPath, downloadUrl };
+}
+
+async function installPackageWithoutWinget(pkg) {
+  if (pkg.id === 'OpenJS.NodeJS.LTS') {
+    return installNodeWithoutWinget();
+  }
+
+  if (pkg.id === 'Git.Git') {
+    return installGitWithoutWinget();
+  }
+
+  throw new Error(`Chua co fallback installer cho prerequisite ${pkg.label}`);
+}
+
 async function installWingetPackage(packageId, label) {
   sendLog(`[Install] Dang cai ${label}...`);
 
@@ -814,16 +955,31 @@ async function ensureInstallPrerequisites() {
     return { installed: [], alreadySatisfied: true };
   }
 
-  if (!await isWingetInstalled()) {
-    throw new Error('Khong tim thay winget de cai Node.js/Git tu dong. Hay cai winget hoac tu cai dat prerequisite truoc.');
+  let wingetInstalled = await isWingetInstalled();
+  let wingetInstallResult = null;
+  if (!wingetInstalled) {
+    try {
+      wingetInstallResult = await installWingetIfMissing();
+      wingetInstalled = await isWingetInstalled();
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      sendLog(`[Install] Cai winget khong thanh cong: ${errorMessage}`);
+      sendLog('[Install] Se dung fallback installer chinh thuc cho Node.js/Git.');
+    }
   }
 
   sendLog(`[Install] Thieu prerequisite: ${missingPackages.map(pkg => `${pkg.label} (${pkg.reason})`).join(', ')}`);
 
   const installedPackages = [];
   for (const pkg of missingPackages) {
-    const output = await installWingetPackage(pkg.id, pkg.label);
-    installedPackages.push({ ...pkg, output });
+    if (wingetInstalled) {
+      const output = await installWingetPackage(pkg.id, pkg.label);
+      installedPackages.push({ ...pkg, output, installMethod: wingetInstallResult?.installed ? 'winget-after-install' : 'winget', wingetInstallResult });
+      continue;
+    }
+
+    const fallbackResult = await installPackageWithoutWinget(pkg);
+    installedPackages.push({ ...pkg, output: null, installMethod: fallbackResult.method, ...fallbackResult });
   }
 
   return { installed: installedPackages, alreadySatisfied: false };
