@@ -717,6 +717,31 @@ function addPathEntriesToProcess(entries = []) {
   process.env.PATH = updatedPath;
 }
 
+function getCommonPrerequisitePathEntries() {
+  const programFiles = process.env.ProgramFiles || 'C:\\Program Files';
+  const programFilesX86 = process.env['ProgramFiles(x86)'] || 'C:\\Program Files (x86)';
+  const localAppData = process.env.LOCALAPPDATA || path.join(getHomeDir(), 'AppData', 'Local');
+  const appData = process.env.APPDATA || path.join(getHomeDir(), 'AppData', 'Roaming');
+
+  return [
+    path.join(programFiles, 'nodejs'),
+    path.join(programFilesX86, 'nodejs'),
+    path.join(localAppData, 'Programs', 'nodejs'),
+    path.join(programFiles, 'Git', 'cmd'),
+    path.join(programFiles, 'Git', 'bin'),
+    path.join(programFilesX86, 'Git', 'cmd'),
+    path.join(programFilesX86, 'Git', 'bin'),
+    path.join(localAppData, 'Programs', 'Git', 'cmd'),
+    path.join(localAppData, 'Programs', 'Git', 'bin'),
+    path.join(appData, 'npm'),
+  ].filter((entry) => entry && fs.existsSync(entry));
+}
+
+async function ensurePrerequisitePathsForCurrentSession() {
+  await reloadProcessPathFromSystem();
+  addPathEntriesToProcess(getCommonPrerequisitePathEntries());
+}
+
 function parseMajorVersion(versionText) {
   const match = String(versionText || '').trim().match(/v?(\d+)/i);
   return match ? Number(match[1]) : null;
@@ -724,6 +749,7 @@ function parseMajorVersion(versionText) {
 
 async function getInstalledNodeMajorVersion() {
   try {
+    await ensurePrerequisitePathsForCurrentSession();
     const { stdout } = await runPowerShellCommand('node --version', {
       logPrefix: 'Prereq',
       streamStdout: false,
@@ -738,6 +764,7 @@ async function getInstalledNodeMajorVersion() {
 
 async function isGitInstalled() {
   try {
+    await ensurePrerequisitePathsForCurrentSession();
     await runPowerShellCommand('git --version', {
       logPrefix: 'Prereq',
       streamStdout: false,
@@ -986,7 +1013,7 @@ async function ensureInstallPrerequisites() {
 }
 
 async function ensureOpenClawPathForCurrentSession() {
-  await reloadProcessPathFromSystem();
+  await ensurePrerequisitePathsForCurrentSession();
 
   try {
     const { stdout } = await runProcessCommand('cmd.exe', ['/d', '/c', 'npm.cmd', 'config', 'get', 'prefix'], {
