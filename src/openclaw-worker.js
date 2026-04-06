@@ -158,6 +158,10 @@ function getOpenClawConfigPath() {
   return path.join(getHomeDir(), '.openclaw', 'openclaw.json');
 }
 
+function getOpenClawHomePath() {
+  return path.join(getHomeDir(), '.openclaw');
+}
+
 function getDefaultOpenClawWorkspacePath() {
   return path.join(getHomeDir(), '.openclaw', 'workspace');
 }
@@ -994,6 +998,38 @@ async function isWingetInstalled() {
   }
 }
 
+async function installWinget() {
+  sendLog('[Install] Khong tim thay winget. Dang cai App Installer (winget)...');
+
+  const installCommand = [
+    "$ErrorActionPreference = 'Stop'",
+    "$ProgressPreference = 'SilentlyContinue'",
+    "$repairCommand = Get-Command Repair-WinGetPackageManager -ErrorAction SilentlyContinue",
+    'if ($repairCommand) {',
+    '  Repair-WinGetPackageManager -AllUsers | Out-Null',
+    '} else {',
+    "  $tempDir = Join-Path $env:TEMP 'openclaw-winget'",
+    '  New-Item -ItemType Directory -Force -Path $tempDir | Out-Null',
+    "  $vclibsPath = Join-Path $tempDir 'Microsoft.VCLibs.x64.14.00.Desktop.appx'",
+    "  $wingetPath = Join-Path $tempDir 'Microsoft.DesktopAppInstaller_8wekyb3d8bbwe.msixbundle'",
+    "  Invoke-WebRequest -Uri 'https://aka.ms/Microsoft.VCLibs.x64.14.00.Desktop.appx' -OutFile $vclibsPath",
+    "  Invoke-WebRequest -Uri 'https://aka.ms/getwinget' -OutFile $wingetPath",
+    '  Add-AppxPackage -Path $vclibsPath -ErrorAction SilentlyContinue | Out-Null',
+    '  Add-AppxPackage -Path $wingetPath | Out-Null',
+    '}',
+  ].join('; ');
+
+  const { stdout, stderr } = await runPowerShellCommand(installCommand, {
+    logPrefix: 'WinGet',
+    streamStdout: true,
+    streamStderr: true,
+  });
+
+  await reloadProcessPathFromSystem();
+  sendLog('[Install] Da cai winget/App Installer.');
+  return stdout || stderr || null;
+}
+
 async function installWingetPackage(packageId, label) {
   sendLog(`[Install] Dang cai ${label}...`);
 
@@ -1019,8 +1055,27 @@ async function installWingetPackage(packageId, label) {
 }
 
 async function ensureInstallPrerequisites() {
-  const nodeMajor = await getInstalledNodeMajorVersion();
-  const gitInstalled = await isGitInstalled();
+  let nodeMajor = await getInstalledNodeMajorVersion();
+  let gitInstalled = await isGitInstalled();
+  let wingetInstalled = await isWingetInstalled();
+  const installedPackages = [];
+
+  if (!wingetInstalled) {
+    const wingetOutput = await installWinget();
+    wingetInstalled = await isWingetInstalled();
+
+    if (!wingetInstalled) {
+      throw new Error('Da thu cai winget/App Installer nhung van khong tim thay winget. Hay mo Microsoft Store cap nhat App Installer roi thu lai.');
+    }
+
+    installedPackages.push({
+      id: 'Microsoft.DesktopAppInstaller',
+      label: 'WinGet / App Installer',
+      reason: 'winget chua duoc cai dat',
+      output: wingetOutput,
+    });
+  }
+
   const missingPackages = [];
 
   if (nodeMajor === null || nodeMajor < 24) {
@@ -1040,20 +1095,27 @@ async function ensureInstallPrerequisites() {
   }
 
   if (missingPackages.length === 0) {
-    sendLog('[Install] He thong da san sang: co Node.js 24+ va Git.');
-    return { installed: [], alreadySatisfied: true };
-  }
-
-  if (!await isWingetInstalled()) {
-    throw new Error('Khong tim thay winget de cai Node.js/Git tu dong. Hay cai winget hoac tu cai dat prerequisite truoc.');
+    sendLog('[Install] He thong da san sang: co winget, Node.js 24+ va Git.');
+    return { installed: installedPackages, alreadySatisfied: installedPackages.length === 0 };
   }
 
   sendLog(`[Install] Thieu prerequisite: ${missingPackages.map(pkg => `${pkg.label} (${pkg.reason})`).join(', ')}`);
 
-  const installedPackages = [];
   for (const pkg of missingPackages) {
     const output = await installWingetPackage(pkg.id, pkg.label);
     installedPackages.push({ ...pkg, output });
+  }
+
+  await reloadProcessPathFromSystem();
+  nodeMajor = await getInstalledNodeMajorVersion();
+  gitInstalled = await isGitInstalled();
+
+  if (nodeMajor === null || nodeMajor < 24) {
+    throw new Error('Da thu cai Node.js nhung he thong van chua nhan Node.js 24+ trong PATH. Hay mo lai app hoac dang nhap lai Windows roi thu lai.');
+  }
+
+  if (!gitInstalled) {
+    throw new Error('Da thu cai Git nhung he thong van chua nhan git trong PATH. Hay mo lai app hoac dang nhap lai Windows roi thu lai.');
   }
 
   return { installed: installedPackages, alreadySatisfied: false };
@@ -1100,6 +1162,79 @@ async function getNpmGlobalPrefix() {
   }
 }
 
+function escapeRegex(value) {
+  return String(value || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function delay(milliseconds) {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds));
+}
+
+async function removePathWithRetries(targetPath, removed, options = {}) {
+  if (!targetPath || !fs.existsSync(targetPath)) {
+    return;
+  }
+
+  const {
+    logLabel = 'Uninstall',
+    stopPattern = null,
+    retries = 4,
+  } = options;
+
+  let lastError = null;
+
+  for (let attempt = 1; attempt <= retries; attempt += 1) {
+    if (stopPattern) {
+      await stopProcessesByPattern(stopPattern, `${logLabel} Cleanup`).catch(() => null);
+    }
+
+    try {
+      fs.rmSync(targetPath, { recursive: true, force: true });
+
+      if (!fs.existsSync(targetPath)) {
+        removed.push(targetPath);
+        return;
+      }
+    } catch (error) {
+      lastError = error;
+      const errorCode = error?.code || 'UNKNOWN';
+      sendLog(`[${logLabel}] Thu xoa lan ${attempt}/${retries} that bai (${errorCode}): ${targetPath}`);
+
+      if (attempt < retries) {
+        await delay(400 * attempt);
+      }
+    }
+  }
+
+  if (fs.existsSync(targetPath)) {
+    try {
+      const isDirectory = fs.lstatSync(targetPath).isDirectory();
+      if (isDirectory) {
+        await runProcessCommand('cmd.exe', ['/d', '/c', 'rmdir', '/s', '/q', targetPath], {
+          logPrefix: logLabel,
+          streamStdout: false,
+          streamStderr: false,
+        });
+      } else {
+        await runProcessCommand('cmd.exe', ['/d', '/c', 'del', '/f', '/q', targetPath], {
+          logPrefix: logLabel,
+          streamStdout: false,
+          streamStderr: false,
+        });
+      }
+    } catch (error) {
+      lastError = error;
+    }
+  }
+
+  if (fs.existsSync(targetPath)) {
+    const reason = lastError?.message || 'File dang bi process khac khoa';
+    throw new Error(`Khong the xoa ${targetPath}: ${reason}`);
+  }
+
+  removed.push(targetPath);
+}
+
 async function removeOpenClawCliArtifacts() {
   const npmPrefix = await getNpmGlobalPrefix();
   if (!npmPrefix || !fs.existsSync(npmPrefix)) {
@@ -1107,20 +1242,30 @@ async function removeOpenClawCliArtifacts() {
   }
 
   const removed = [];
+  const openClawInstallPath = path.join(npmPrefix, 'node_modules', 'openclaw');
+  const installPathPattern = escapeRegex(openClawInstallPath);
+  const wrapperPattern = 'openclaw(?:\\.cmd|\\.ps1)?';
+
   const targets = [
-    path.join(npmPrefix, 'node_modules', 'openclaw'),
-    path.join(npmPrefix, 'openclaw'),
-    path.join(npmPrefix, 'openclaw.cmd'),
-    path.join(npmPrefix, 'openclaw.ps1'),
+    { path: openClawInstallPath, stopPattern: installPathPattern },
+    { path: path.join(npmPrefix, 'openclaw'), stopPattern: wrapperPattern },
+    { path: path.join(npmPrefix, 'openclaw.cmd'), stopPattern: wrapperPattern },
+    { path: path.join(npmPrefix, 'openclaw.ps1'), stopPattern: wrapperPattern },
   ];
 
-  for (const targetPath of targets) {
+  await stopProcessesByPattern(installPathPattern, 'Uninstall Cleanup').catch(() => null);
+  await stopProcessesByPattern(wrapperPattern, 'Uninstall Cleanup').catch(() => null);
+
+  for (const target of targets) {
+    const targetPath = target.path;
     if (!fs.existsSync(targetPath)) {
       continue;
     }
 
-    fs.rmSync(targetPath, { recursive: true, force: true });
-    removed.push(targetPath);
+    await removePathWithRetries(targetPath, removed, {
+      logLabel: 'Uninstall',
+      stopPattern: target.stopPattern,
+    });
   }
 
   for (const entry of fs.readdirSync(npmPrefix, { withFileTypes: true })) {
@@ -1129,8 +1274,10 @@ async function removeOpenClawCliArtifacts() {
     }
 
     const targetPath = path.join(npmPrefix, entry.name);
-    fs.rmSync(targetPath, { recursive: true, force: true });
-    removed.push(targetPath);
+    await removePathWithRetries(targetPath, removed, {
+      logLabel: 'Uninstall',
+      stopPattern: escapeRegex(targetPath),
+    });
   }
 
   const nodeModulesDir = path.join(npmPrefix, 'node_modules');
@@ -1141,10 +1288,44 @@ async function removeOpenClawCliArtifacts() {
       }
 
       const targetPath = path.join(nodeModulesDir, entry.name);
-      fs.rmSync(targetPath, { recursive: true, force: true });
-      removed.push(targetPath);
+      await removePathWithRetries(targetPath, removed, {
+        logLabel: 'Uninstall',
+        stopPattern: escapeRegex(targetPath),
+      });
     }
   }
+
+  return { removed };
+}
+
+async function removePathIfExists(targetPath, removed) {
+  if (!targetPath || !fs.existsSync(targetPath)) {
+    return;
+  }
+
+  await removePathWithRetries(targetPath, removed, {
+    logLabel: 'Uninstall',
+    stopPattern: escapeRegex(targetPath),
+  });
+}
+
+async function removeOpenClawDataArtifacts() {
+  const removed = [];
+  const configuredWorkspacePath = getConfiguredOpenClawWorkspacePath();
+  const defaultWorkspacePath = getDefaultOpenClawWorkspacePath();
+  const openClawHomePath = getOpenClawHomePath();
+  const tempOpenClawPath = process.env.LOCALAPPDATA
+    ? path.join(process.env.LOCALAPPDATA, 'Temp', 'openclaw')
+    : null;
+
+  await removePathIfExists(configuredWorkspacePath, removed);
+
+  if (configuredWorkspacePath !== defaultWorkspacePath) {
+    await removePathIfExists(defaultWorkspacePath, removed);
+  }
+
+  await removePathIfExists(openClawHomePath, removed);
+  await removePathIfExists(tempOpenClawPath, removed);
 
   return { removed };
 }
@@ -1774,21 +1955,9 @@ async function handleUninstall() {
   await stopExternalGatewayProcesses().catch(() => null);
   await stopProcessesByPattern('openclaw\\.mjs gateway run', 'Uninstall Cleanup').catch(() => null);
   await stopProcessesByPattern('npm-cli\\.js" (install|uninstall) -g openclaw', 'Uninstall Cleanup').catch(() => null);
+  sendLog('[Uninstall] Bo qua lenh `openclaw uninstall` vi CLI co the gay stack overflow tren Windows. Dang go thu cong...');
 
-  const uninstallCommand = 'openclaw uninstall --all --yes --non-interactive';
-  let uninstallOutput = null;
-
-  try {
-    const { stdout, stderr } = await runPowerShellCommand(uninstallCommand, {
-      logPrefix: 'Uninstall',
-      streamStdout: true,
-      streamStderr: true,
-    });
-    uninstallOutput = stdout || stderr || null;
-  } catch (error) {
-    sendLog(`[Uninstall] Lenh openclaw uninstall khong chay tron ven: ${error.message}`);
-  }
-
+  const dataCleanup = await removeOpenClawDataArtifacts();
   const cliCleanup = await removeOpenClawCliArtifacts();
   await reloadProcessPathFromSystem();
   sendLog('[Uninstall] Da go sach OpenClaw va CLI global.');
@@ -1797,8 +1966,8 @@ async function handleUninstall() {
     status: 'ok',
     message: 'Da go sach OpenClaw',
     details: {
-      command: uninstallCommand,
-      output: uninstallOutput,
+      command: 'manual-cleanup',
+      removedDataArtifacts: dataCleanup.removed,
       removedCliArtifacts: cliCleanup.removed,
     },
   };
