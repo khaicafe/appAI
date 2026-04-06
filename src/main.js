@@ -17,6 +17,7 @@ const gatewayDashboardUrl = 'http://localhost:18789/';
 const OPENCLAW_GEMINI_FLASH_MODEL = 'google/gemini-2.5-flash';
 const OPENCLAW_GOOGLE_PROFILE_ID = 'google:default';
 const OPENCLAW_OPENROUTER_MODEL = 'openrouter/qwen/qwen3.6-plus:free';
+const OPENROUTER_API_MODEL = OPENCLAW_OPENROUTER_MODEL.replace(/^openrouter\//, '');
 const OPENCLAW_OPENROUTER_PROFILE_ID = 'openrouter:default';
 const TELEGRAM_MEDIA_MAX_MB = 100;
 
@@ -52,6 +53,84 @@ const PROVIDER_CONFIG = {
     },
   },
 };
+
+const MANAGED_PROVIDER_MODEL_NAMES = Array.from(
+  new Set(Object.values(PROVIDER_CONFIG).flatMap((providerConfig) => Object.keys(providerConfig.modelEntries))),
+);
+const MANAGED_PROVIDER_PROFILE_IDS = Array.from(
+  new Set(Object.values(PROVIDER_CONFIG).map((providerConfig) => providerConfig.profileId)),
+);
+
+function parseJsonSafe(value) {
+  try {
+    return JSON.parse(value);
+  } catch (_error) {
+    return null;
+  }
+}
+
+function isOpenRouterAuthFailure(status, message = '') {
+  const normalizedMessage = String(message || '').toLowerCase();
+  return status === 401
+    || normalizedMessage.includes('user not found')
+    || normalizedMessage.includes('invalid api key');
+}
+
+async function validateOpenRouterChatAccess(apiKey) {
+  if (!apiKey) {
+    return {
+      ok: false,
+      status: 0,
+      reason: 'missing',
+      message: 'Missing OpenRouter API key.',
+    };
+  }
+
+  try {
+    const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        'Content-Type': 'application/json',
+        'HTTP-Referer': 'http://localhost',
+        'X-Title': 'OpenClaw Controller',
+      },
+      body: JSON.stringify({
+        model: OPENROUTER_API_MODEL,
+        messages: [{ role: 'user', content: 'ok' }],
+        max_tokens: 1,
+      }),
+      signal: AbortSignal.timeout(10000),
+    });
+
+    const responseText = await response.text();
+    const payload = parseJsonSafe(responseText);
+    const message = payload?.error?.message || payload?.message || responseText || `HTTP ${response.status}`;
+
+    if (response.ok) {
+      return {
+        ok: true,
+        status: response.status,
+        reason: null,
+        message: 'OpenRouter chat access OK.',
+      };
+    }
+
+    return {
+      ok: false,
+      status: response.status,
+      reason: isOpenRouterAuthFailure(response.status, message) ? 'auth' : 'request-failed',
+      message: String(message).trim(),
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      status: 0,
+      reason: 'network',
+      message: error?.message || String(error),
+    };
+  }
+}
 
 function resetGatewayState() {
   gatewayReady = false;
@@ -206,7 +285,8 @@ function getOpenClawCredentialsPath() {
 }
 
 function readJsonFile(filePath) {
-  return JSON.parse(fs.readFileSync(filePath, 'utf8'));
+  const content = fs.readFileSync(filePath, 'utf8').replace(/^\uFEFF/, '');
+  return JSON.parse(content);
 }
 
 function writeJsonFile(filePath, data) {
@@ -533,6 +613,14 @@ function getSavedApiKeyForProvider(savedKeys, provider) {
   return typeof apiKey === 'string' && apiKey.trim() ? apiKey.trim() : null;
 }
 
+function getEffectiveApiKeyForProvider(provider, options = {}, savedKeys = null) {
+  const requestedApiKey = provider === 'openrouter'
+    ? String(options.openrouterApiKey || '').trim()
+    : String(options.geminiApiKey || '').trim();
+
+  return requestedApiKey || getSavedApiKeyForProvider(savedKeys, provider) || getStoredApiKey(provider) || null;
+}
+
 function hasProviderSignal(provider, existingConfig = null, savedKeys = null) {
   if (getStoredApiKey(provider)) {
     return true;
@@ -551,22 +639,40 @@ async function getDesiredProviderState(existingConfig = null, options = {}) {
   const detectedProvider = detectProviderFromConfig(existingConfig || {});
   const hasOpenRouter = hasProviderSignal('openrouter', existingConfig, savedKeys);
   const hasGemini = hasProviderSignal('gemini', existingConfig, savedKeys);
+  const openrouterApiKey = hasOpenRouter ? getEffectiveApiKeyForProvider('openrouter', options, savedKeys) : null;
+  const openrouterValidation = openrouterApiKey ? await validateOpenRouterChatAccess(openrouterApiKey) : null;
+  const openrouterAuthFailed = Boolean(openrouterValidation && !openrouterValidation.ok && openrouterValidation.reason === 'auth');
 
-  if (hasOpenRouter) {
+  if (hasOpenRouter && !openrouterAuthFailed) {
     return {
       primaryProvider: 'openrouter',
       authProviders: hasGemini ? ['gemini', 'openrouter'] : ['openrouter'],
       modelProviders: ['gemini', 'openrouter'],
       savedKeys,
+      warning: null,
     };
   }
 
   if (hasGemini) {
     return {
       primaryProvider: 'gemini',
-      authProviders: ['gemini'],
-      modelProviders: ['gemini'],
+      authProviders: hasOpenRouter ? ['gemini', 'openrouter'] : ['gemini'],
+      modelProviders: hasOpenRouter ? ['gemini', 'openrouter'] : ['gemini'],
       savedKeys,
+      warning: openrouterAuthFailed
+        ? `OpenRouter API key khong dung duoc cho chat (${openrouterValidation.message}). Da chuyen sang Gemini.`
+        : null,
+    };
+  }
+
+  if (openrouterAuthFailed) {
+    return {
+      primaryProvider: null,
+      authProviders: [],
+      modelProviders: [],
+      savedKeys,
+      warning: null,
+      error: `OpenRouter API key khong dung duoc cho chat (${openrouterValidation.message}). Vui long cap nhat OpenRouter key hoac them Gemini API key.`,
     };
   }
 
@@ -576,7 +682,17 @@ async function getDesiredProviderState(existingConfig = null, options = {}) {
     authProviders: fallbackProvider ? [fallbackProvider] : [],
     modelProviders: fallbackProvider ? [fallbackProvider] : [],
     savedKeys,
+    warning: null,
   };
+}
+
+function buildManagedModelEntries(providerNames = []) {
+  return providerNames.reduce((entries, providerName) => {
+    return {
+      ...entries,
+      ...PROVIDER_CONFIG[providerName].modelEntries,
+    };
+  }, {});
 }
 
 function resolveInstallProvider(params = {}) {
@@ -635,6 +751,9 @@ async function reconcileOpenClawConfigState(options = {}) {
 
   const config = readJsonFile(configPath);
   const providerState = await getDesiredProviderState(config, options);
+  if (providerState.error) {
+    throw new Error(providerState.error);
+  }
   const provider = providerState.primaryProvider;
   if (!provider) {
     return result;
@@ -644,12 +763,15 @@ async function reconcileOpenClawConfigState(options = {}) {
   const currentDefaults = config.agents?.defaults || {};
   const currentPrimaryModel = currentDefaults.model?.primary || null;
   const currentModels = currentDefaults.models || {};
-  const mergedModelEntries = providerState.modelProviders.reduce((entries, providerName) => {
-    return {
-      ...entries,
-      ...PROVIDER_CONFIG[providerName].modelEntries,
-    };
-  }, {});
+  const currentConfigAuthProfiles = config.auth?.profiles || {};
+  const managedModelEntries = buildManagedModelEntries(providerState.modelProviders);
+  const preservedModelEntries = Object.fromEntries(
+    Object.entries(currentModels).filter(([modelName]) => !MANAGED_PROVIDER_MODEL_NAMES.includes(modelName)),
+  );
+  const mergedModelEntries = {
+    ...preservedModelEntries,
+    ...managedModelEntries,
+  };
   const currentTelegramEnabled = config.channels?.telegram?.enabled === true;
   const currentTelegramBotToken = typeof config.channels?.telegram?.botToken === 'string'
     ? config.channels.telegram.botToken
@@ -665,6 +787,14 @@ async function reconcileOpenClawConfigState(options = {}) {
     const currentEntry = currentModels[modelName] || {};
     return Object.entries(modelConfig).some(([key, value]) => currentEntry[key] !== value);
   });
+  const staleManagedModelsPresent = Object.keys(currentModels).some((modelName) => {
+    return MANAGED_PROVIDER_MODEL_NAMES.includes(modelName)
+      && !Object.prototype.hasOwnProperty.call(managedModelEntries, modelName);
+  });
+  const staleManagedConfigProfilesPresent = Object.keys(currentConfigAuthProfiles).some((profileId) => {
+    return MANAGED_PROVIDER_PROFILE_IDS.includes(profileId)
+      && !providerState.authProviders.some((providerName) => PROVIDER_CONFIG[providerName].profileId === profileId);
+  });
 
   config.agents = config.agents || {};
   config.agents.defaults = {
@@ -673,10 +803,7 @@ async function reconcileOpenClawConfigState(options = {}) {
       ...(currentDefaults.model || {}),
       primary: providerConfig.model,
     },
-    models: {
-      ...currentModels,
-      ...mergedModelEntries,
-    },
+    models: mergedModelEntries,
   };
 
   if (providerState.authProviders.includes('gemini')) {
@@ -689,7 +816,9 @@ async function reconcileOpenClawConfigState(options = {}) {
   }
 
   config.auth = config.auth || {};
-  config.auth.profiles = config.auth.profiles || {};
+  config.auth.profiles = Object.fromEntries(
+    Object.entries(currentConfigAuthProfiles).filter(([profileId]) => !MANAGED_PROVIDER_PROFILE_IDS.includes(profileId)),
+  );
   for (const providerName of providerState.authProviders) {
     const activeProviderConfig = PROVIDER_CONFIG[providerName];
     config.auth.profiles[activeProviderConfig.profileId] = {
@@ -705,13 +834,31 @@ async function reconcileOpenClawConfigState(options = {}) {
     : { version: 1, profiles: {}, lastGood: {} };
 
   authProfiles.version = 1;
-  authProfiles.profiles = authProfiles.profiles || {};
-  authProfiles.lastGood = authProfiles.lastGood || {};
+  const currentAuthProfiles = authProfiles.profiles || {};
+  const currentLastGood = authProfiles.lastGood || {};
+  const staleManagedStoredProfilesPresent = Object.keys(currentAuthProfiles).some((profileId) => {
+    return MANAGED_PROVIDER_PROFILE_IDS.includes(profileId)
+      && !providerState.authProviders.some((providerName) => PROVIDER_CONFIG[providerName].profileId === profileId);
+  });
+  const staleManagedLastGoodPresent = Object.values(PROVIDER_CONFIG).some((providerConfigEntry) => {
+    return !providerState.authProviders.some((providerName) => PROVIDER_CONFIG[providerName].provider === providerConfigEntry.provider)
+      && Object.prototype.hasOwnProperty.call(currentLastGood, providerConfigEntry.provider);
+  });
+  authProfiles.profiles = Object.fromEntries(
+    Object.entries(currentAuthProfiles).filter(([profileId]) => !MANAGED_PROVIDER_PROFILE_IDS.includes(profileId)),
+  );
+  authProfiles.lastGood = { ...currentLastGood };
+  for (const providerConfigEntry of Object.values(PROVIDER_CONFIG)) {
+    delete authProfiles.lastGood[providerConfigEntry.provider];
+  }
 
   let authProfilesChanged = false;
+  if (staleManagedStoredProfilesPresent || staleManagedLastGoodPresent) {
+    authProfilesChanged = true;
+  }
   for (const providerName of providerState.authProviders) {
     const activeProviderConfig = PROVIDER_CONFIG[providerName];
-    const apiKey = getSavedApiKeyForProvider(providerState.savedKeys, providerName) || getStoredApiKey(providerName);
+    const apiKey = getEffectiveApiKeyForProvider(providerName, options, providerState.savedKeys);
     if (!apiKey) {
       continue;
     }
@@ -750,6 +897,8 @@ async function reconcileOpenClawConfigState(options = {}) {
   if (
     currentPrimaryModel !== providerConfig.model
     || missingModelEntries
+    || staleManagedModelsPresent
+    || staleManagedConfigProfilesPresent
     || currentTelegramEnabled !== Boolean(telegramBotToken)
     || (telegramBotToken && currentTelegramBotToken !== telegramBotToken)
     || currentTelegramSendMessage !== true
@@ -768,6 +917,8 @@ async function reconcileOpenClawConfigState(options = {}) {
   if (authProfilesChanged) {
     writeJsonFile(authProfilesPath, authProfiles);
   }
+
+  result.warning = providerState.warning || null;
 
   return result;
 }
@@ -1189,6 +1340,9 @@ ipcMain.handle('openclaw:command', async (_event, command, params) => {
       const reconciled = await reconcileOpenClawConfigState();
       if (reconciled.modelChanged) {
         sendRendererLog(`[Gateway] Da dong bo config theo provider ${reconciled.provider}`);
+      }
+      if (reconciled.warning) {
+        sendRendererLog(`[Gateway] ${reconciled.warning}`);
       }
 
       if (await checkGatewayHttpReady()) {

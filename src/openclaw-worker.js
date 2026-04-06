@@ -7,6 +7,7 @@ const { getSavedKeys, saveKeys } = require('./key-store');
 const OPENCLAW_GEMINI_FLASH_MODEL = 'google/gemini-2.5-flash';
 const OPENCLAW_GOOGLE_PROFILE_ID = 'google:default';
 const OPENCLAW_OPENROUTER_MODEL = 'openrouter/qwen/qwen3.6-plus:free';
+const OPENROUTER_API_MODEL = OPENCLAW_OPENROUTER_MODEL.replace(/^openrouter\//, '');
 const OPENCLAW_OPENROUTER_PROFILE_ID = 'openrouter:default';
 const TELEGRAM_MEDIA_MAX_MB = 100;
 
@@ -41,6 +42,13 @@ const PROVIDER_CONFIG = {
   },
 };
 
+const MANAGED_PROVIDER_MODEL_NAMES = Array.from(
+  new Set(Object.values(PROVIDER_CONFIG).flatMap((providerConfig) => Object.keys(providerConfig.modelEntries))),
+);
+const MANAGED_PROVIDER_PROFILE_IDS = Array.from(
+  new Set(Object.values(PROVIDER_CONFIG).map((providerConfig) => providerConfig.profileId)),
+);
+
 function sendMessage(payload) {
   if (typeof process.send === 'function') {
     process.send(payload);
@@ -63,6 +71,77 @@ function sendError(error) {
       stack: error?.stack || null,
     },
   });
+}
+
+function parseJsonSafe(value) {
+  try {
+    return JSON.parse(value);
+  } catch (_error) {
+    return null;
+  }
+}
+
+function isOpenRouterAuthFailure(status, message = '') {
+  const normalizedMessage = String(message || '').toLowerCase();
+  return status === 401
+    || normalizedMessage.includes('user not found')
+    || normalizedMessage.includes('invalid api key');
+}
+
+async function validateOpenRouterChatAccess(apiKey) {
+  if (!apiKey) {
+    return {
+      ok: false,
+      status: 0,
+      reason: 'missing',
+      message: 'Missing OpenRouter API key.',
+    };
+  }
+
+  try {
+    const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        'Content-Type': 'application/json',
+        'HTTP-Referer': 'http://localhost',
+        'X-Title': 'OpenClaw Controller',
+      },
+      body: JSON.stringify({
+        model: OPENROUTER_API_MODEL,
+        messages: [{ role: 'user', content: 'ok' }],
+        max_tokens: 1,
+      }),
+      signal: AbortSignal.timeout(10000),
+    });
+
+    const responseText = await response.text();
+    const payload = parseJsonSafe(responseText);
+    const message = payload?.error?.message || payload?.message || responseText || `HTTP ${response.status}`;
+
+    if (response.ok) {
+      return {
+        ok: true,
+        status: response.status,
+        reason: null,
+        message: 'OpenRouter chat access OK.',
+      };
+    }
+
+    return {
+      ok: false,
+      status: response.status,
+      reason: isOpenRouterAuthFailure(response.status, message) ? 'auth' : 'request-failed',
+      message: String(message).trim(),
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      status: 0,
+      reason: 'network',
+      message: error?.message || String(error),
+    };
+  }
 }
 
 function escapePowerShellString(value) {
@@ -106,7 +185,8 @@ function getBundledSkillsPath() {
 }
 
 function readJsonFile(filePath) {
-  return JSON.parse(fs.readFileSync(filePath, 'utf8'));
+  const content = fs.readFileSync(filePath, 'utf8').replace(/^\uFEFF/, '');
+  return JSON.parse(content);
 }
 
 function writeJsonFile(filePath, data) {
@@ -251,6 +331,14 @@ function getSavedApiKeyForProvider(savedKeys, provider) {
   return typeof apiKey === 'string' && apiKey.trim() ? apiKey.trim() : null;
 }
 
+function getEffectiveApiKeyForProvider(provider, options = {}, savedKeys = null) {
+  const requestedApiKey = provider === 'openrouter'
+    ? String(options.openrouterApiKey || '').trim()
+    : String(options.geminiApiKey || '').trim();
+
+  return requestedApiKey || getSavedApiKeyForProvider(savedKeys, provider) || getStoredApiKey(provider) || null;
+}
+
 function hasProviderSignal(provider, options = {}, existingConfig = null, savedKeys = null) {
   const requestedApiKey = provider === 'openrouter'
     ? String(options.openrouterApiKey || '').trim()
@@ -277,22 +365,40 @@ async function getDesiredProviderState(options = {}, existingConfig = null) {
   const detectedProvider = detectProviderFromConfig(existingConfig || {});
   const hasOpenRouter = hasProviderSignal('openrouter', options, existingConfig, savedKeys);
   const hasGemini = hasProviderSignal('gemini', options, existingConfig, savedKeys);
+  const openrouterApiKey = hasOpenRouter ? getEffectiveApiKeyForProvider('openrouter', options, savedKeys) : null;
+  const openrouterValidation = openrouterApiKey ? await validateOpenRouterChatAccess(openrouterApiKey) : null;
+  const openrouterAuthFailed = Boolean(openrouterValidation && !openrouterValidation.ok && openrouterValidation.reason === 'auth');
 
-  if (hasOpenRouter) {
+  if (hasOpenRouter && !openrouterAuthFailed) {
     return {
       primaryProvider: 'openrouter',
       authProviders: hasGemini ? ['gemini', 'openrouter'] : ['openrouter'],
       modelProviders: ['gemini', 'openrouter'],
       savedKeys,
+      warning: null,
     };
   }
 
   if (hasGemini) {
     return {
       primaryProvider: 'gemini',
-      authProviders: ['gemini'],
-      modelProviders: ['gemini'],
+      authProviders: hasOpenRouter ? ['gemini', 'openrouter'] : ['gemini'],
+      modelProviders: hasOpenRouter ? ['gemini', 'openrouter'] : ['gemini'],
       savedKeys,
+      warning: openrouterAuthFailed
+        ? `OpenRouter API key khong dung duoc cho chat (${openrouterValidation.message}). Da chuyen sang Gemini.`
+        : null,
+    };
+  }
+
+  if (openrouterAuthFailed) {
+    return {
+      primaryProvider: null,
+      authProviders: [],
+      modelProviders: [],
+      savedKeys,
+      warning: null,
+      error: `OpenRouter API key khong dung duoc cho chat (${openrouterValidation.message}). Vui long cap nhat OpenRouter key hoac them Gemini API key.`,
     };
   }
 
@@ -302,7 +408,17 @@ async function getDesiredProviderState(options = {}, existingConfig = null) {
     authProviders: fallbackProvider ? [fallbackProvider] : [],
     modelProviders: fallbackProvider ? [fallbackProvider] : [],
     savedKeys,
+    warning: null,
   };
+}
+
+function buildManagedModelEntries(providerNames = []) {
+  return providerNames.reduce((entries, providerName) => {
+    return {
+      ...entries,
+      ...PROVIDER_CONFIG[providerName].modelEntries,
+    };
+  }, {});
 }
 
 function buildBaseOpenClawConfig(primaryProvider) {
@@ -392,6 +508,9 @@ async function reconcileOpenClawConfigState(options = {}) {
   const requestedTelegramBotToken = String(options.telegramBotToken || '').trim();
   const existingConfig = fs.existsSync(configPath) ? readJsonFile(configPath) : null;
   const providerState = await getDesiredProviderState(options, existingConfig || {});
+  if (providerState.error) {
+    throw new Error(providerState.error);
+  }
   const activeProviders = providerState.authProviders;
   const primaryProvider = providerState.primaryProvider;
 
@@ -404,12 +523,15 @@ async function reconcileOpenClawConfigState(options = {}) {
   const currentDefaults = config.agents?.defaults || {};
   const currentPrimaryModel = currentDefaults.model?.primary || null;
   const currentModels = currentDefaults.models || {};
-  const mergedModelEntries = providerState.modelProviders.reduce((entries, providerName) => {
-    return {
-      ...entries,
-      ...PROVIDER_CONFIG[providerName].modelEntries,
-    };
-  }, {});
+  const currentConfigAuthProfiles = config.auth?.profiles || {};
+  const managedModelEntries = buildManagedModelEntries(providerState.modelProviders);
+  const preservedModelEntries = Object.fromEntries(
+    Object.entries(currentModels).filter(([modelName]) => !MANAGED_PROVIDER_MODEL_NAMES.includes(modelName)),
+  );
+  const mergedModelEntries = {
+    ...preservedModelEntries,
+    ...managedModelEntries,
+  };
   const missingModelEntries = Object.entries(mergedModelEntries).some(([modelName, modelConfig]) => {
     if (!Object.prototype.hasOwnProperty.call(currentModels, modelName)) {
       return true;
@@ -417,6 +539,14 @@ async function reconcileOpenClawConfigState(options = {}) {
 
     const currentEntry = currentModels[modelName] || {};
     return Object.entries(modelConfig).some(([key, value]) => currentEntry[key] !== value);
+  });
+  const staleManagedModelsPresent = Object.keys(currentModels).some((modelName) => {
+    return MANAGED_PROVIDER_MODEL_NAMES.includes(modelName)
+      && !Object.prototype.hasOwnProperty.call(managedModelEntries, modelName);
+  });
+  const staleManagedConfigProfilesPresent = Object.keys(currentConfigAuthProfiles).some((profileId) => {
+    return MANAGED_PROVIDER_PROFILE_IDS.includes(profileId)
+      && !activeProviders.some((providerName) => PROVIDER_CONFIG[providerName].profileId === profileId);
   });
   const currentProviderPluginEnabled = providerConfig.pluginKey
     ? config.plugins?.entries?.[providerConfig.pluginKey]?.enabled === true
@@ -439,10 +569,7 @@ async function reconcileOpenClawConfigState(options = {}) {
       ...(currentDefaults.model || {}),
       primary: providerConfig.model,
     },
-    models: {
-      ...currentModels,
-      ...mergedModelEntries,
-    },
+    models: mergedModelEntries,
   };
 
   if (activeProviders.includes('gemini')) {
@@ -477,7 +604,9 @@ async function reconcileOpenClawConfigState(options = {}) {
   }
 
   config.auth = config.auth || {};
-  config.auth.profiles = config.auth.profiles || {};
+  config.auth.profiles = Object.fromEntries(
+    Object.entries(currentConfigAuthProfiles).filter(([profileId]) => !MANAGED_PROVIDER_PROFILE_IDS.includes(profileId)),
+  );
   for (const providerName of activeProviders) {
     const activeProviderConfig = PROVIDER_CONFIG[providerName];
     config.auth.profiles[activeProviderConfig.profileId] = {
@@ -489,6 +618,8 @@ async function reconcileOpenClawConfigState(options = {}) {
 
   const needsConfigUpdate = currentPrimaryModel !== providerConfig.model
     || missingModelEntries
+    || staleManagedModelsPresent
+    || staleManagedConfigProfilesPresent
     || currentToolsProfile !== 'full'
     || currentToolsExecAsk !== 'off'
     || currentToolsExecSecurity !== 'full'
@@ -516,15 +647,30 @@ async function reconcileOpenClawConfigState(options = {}) {
   let authChanged = false;
 
   authProfiles.version = 1;
-  authProfiles.profiles = authProfiles.profiles || {};
-  authProfiles.lastGood = authProfiles.lastGood || {};
+  const currentAuthProfiles = authProfiles.profiles || {};
+  const currentLastGood = authProfiles.lastGood || {};
+  const staleManagedStoredProfilesPresent = Object.keys(currentAuthProfiles).some((profileId) => {
+    return MANAGED_PROVIDER_PROFILE_IDS.includes(profileId)
+      && !activeProviders.some((providerName) => PROVIDER_CONFIG[providerName].profileId === profileId);
+  });
+  const staleManagedLastGoodPresent = Object.values(PROVIDER_CONFIG).some((providerConfigEntry) => {
+    return !activeProviders.some((providerName) => PROVIDER_CONFIG[providerName].provider === providerConfigEntry.provider)
+      && Object.prototype.hasOwnProperty.call(currentLastGood, providerConfigEntry.provider);
+  });
+  authProfiles.profiles = Object.fromEntries(
+    Object.entries(currentAuthProfiles).filter(([profileId]) => !MANAGED_PROVIDER_PROFILE_IDS.includes(profileId)),
+  );
+  authProfiles.lastGood = { ...currentLastGood };
+  for (const providerConfigEntry of Object.values(PROVIDER_CONFIG)) {
+    delete authProfiles.lastGood[providerConfigEntry.provider];
+  }
+  if (staleManagedStoredProfilesPresent || staleManagedLastGoodPresent) {
+    authChanged = true;
+  }
 
   for (const providerName of activeProviders) {
     const activeProviderConfig = PROVIDER_CONFIG[providerName];
-    const requestedApiKey = providerName === 'openrouter'
-      ? String(options.openrouterApiKey || '').trim()
-      : String(options.geminiApiKey || '').trim();
-    const apiKey = requestedApiKey || getSavedApiKeyForProvider(providerState.savedKeys, providerName) || getStoredApiKey(providerName);
+    const apiKey = getEffectiveApiKeyForProvider(providerName, options, providerState.savedKeys);
     if (!apiKey) {
       continue;
     }
@@ -550,6 +696,8 @@ async function reconcileOpenClawConfigState(options = {}) {
     writeJsonFile(authProfilesPath, authProfiles);
     result.authChanged = true;
   }
+
+  result.warning = providerState.warning || null;
 
   return result;
 }
@@ -717,31 +865,6 @@ function addPathEntriesToProcess(entries = []) {
   process.env.PATH = updatedPath;
 }
 
-function getCommonPrerequisitePathEntries() {
-  const programFiles = process.env.ProgramFiles || 'C:\\Program Files';
-  const programFilesX86 = process.env['ProgramFiles(x86)'] || 'C:\\Program Files (x86)';
-  const localAppData = process.env.LOCALAPPDATA || path.join(getHomeDir(), 'AppData', 'Local');
-  const appData = process.env.APPDATA || path.join(getHomeDir(), 'AppData', 'Roaming');
-
-  return [
-    path.join(programFiles, 'nodejs'),
-    path.join(programFilesX86, 'nodejs'),
-    path.join(localAppData, 'Programs', 'nodejs'),
-    path.join(programFiles, 'Git', 'cmd'),
-    path.join(programFiles, 'Git', 'bin'),
-    path.join(programFilesX86, 'Git', 'cmd'),
-    path.join(programFilesX86, 'Git', 'bin'),
-    path.join(localAppData, 'Programs', 'Git', 'cmd'),
-    path.join(localAppData, 'Programs', 'Git', 'bin'),
-    path.join(appData, 'npm'),
-  ].filter((entry) => entry && fs.existsSync(entry));
-}
-
-async function ensurePrerequisitePathsForCurrentSession() {
-  await reloadProcessPathFromSystem();
-  addPathEntriesToProcess(getCommonPrerequisitePathEntries());
-}
-
 function parseMajorVersion(versionText) {
   const match = String(versionText || '').trim().match(/v?(\d+)/i);
   return match ? Number(match[1]) : null;
@@ -749,7 +872,6 @@ function parseMajorVersion(versionText) {
 
 async function getInstalledNodeMajorVersion() {
   try {
-    await ensurePrerequisitePathsForCurrentSession();
     const { stdout } = await runPowerShellCommand('node --version', {
       logPrefix: 'Prereq',
       streamStdout: false,
@@ -764,7 +886,6 @@ async function getInstalledNodeMajorVersion() {
 
 async function isGitInstalled() {
   try {
-    await ensurePrerequisitePathsForCurrentSession();
     await runPowerShellCommand('git --version', {
       logPrefix: 'Prereq',
       streamStdout: false,
@@ -789,147 +910,6 @@ async function isWingetInstalled() {
   } catch (_error) {
     return false;
   }
-}
-
-function getPrereqInstallerDir() {
-  return path.join(os.tmpdir(), 'openclaw-controller-installers');
-}
-
-function getPrereqInstallerPath(fileName) {
-  fs.mkdirSync(getPrereqInstallerDir(), { recursive: true });
-  return path.join(getPrereqInstallerDir(), fileName);
-}
-
-async function resolveLatestNodeMsiUrl() {
-  const script = [
-    "$page = Invoke-WebRequest -UseBasicParsing 'https://nodejs.org/dist/latest-v24.x/';",
-    "$link = $page.Links | Where-Object { $_.href -match 'x64\\.msi$' } | Select-Object -First 1 -ExpandProperty href;",
-    "if (-not $link) { throw 'Khong tim thay Node.js x64 MSI trong latest-v24.x'; }",
-    "if ($link -match '^https?://') { Write-Output $link } else { Write-Output ('https://nodejs.org/dist/latest-v24.x/' + $link.TrimStart('/')) }",
-  ].join(' ');
-
-  const { stdout } = await runPowerShellCommand(script, {
-    logPrefix: 'Prereq',
-    streamStdout: false,
-    streamStderr: false,
-  });
-
-  return stdout.trim();
-}
-
-async function downloadFile(url, destinationPath, label) {
-  const script = [
-    `$ProgressPreference = 'SilentlyContinue';`,
-    `Invoke-WebRequest -UseBasicParsing -Uri ${escapePowerShellString(url)} -OutFile ${escapePowerShellString(destinationPath)};`,
-    `Write-Output ${escapePowerShellString(destinationPath)};`,
-  ].join(' ');
-
-  sendLog(`[Install] Dang tai ${label} tu ${url}`);
-  await runPowerShellCommand(script, {
-    logPrefix: label,
-    streamStdout: true,
-    streamStderr: true,
-  });
-}
-
-async function installWingetIfMissing() {
-  const alreadyInstalled = await isWingetInstalled();
-  if (alreadyInstalled) {
-    return { installed: false, method: 'existing' };
-  }
-
-  const vcLibsUrl = 'https://aka.ms/Microsoft.VCLibs.x64.14.00.Desktop.appx';
-  const bundleUrl = 'https://aka.ms/getwinget';
-  const vcLibsPath = getPrereqInstallerPath('Microsoft.VCLibs.x64.14.00.Desktop.appx');
-  const bundlePath = getPrereqInstallerPath('Microsoft.DesktopAppInstaller_8wekyb3d8bbwe.msixbundle');
-
-  sendLog('[Install] Khong tim thay winget. Dang thu cai App Installer de bo sung winget...');
-  await downloadFile(vcLibsUrl, vcLibsPath, 'Microsoft.VCLibs x64');
-  await downloadFile(bundleUrl, bundlePath, 'Microsoft App Installer');
-
-  const installScript = [
-    `$vcLibsPath = ${escapePowerShellString(vcLibsPath)};`,
-    `$bundlePath = ${escapePowerShellString(bundlePath)};`,
-    `try { Add-AppxPackage -Path $vcLibsPath -ErrorAction Stop; } catch { Write-Output ('Bo qua VCLibs: ' + $_.Exception.Message) }`,
-    `Add-AppxPackage -Path $bundlePath -ErrorAction Stop;`,
-    `Write-Output 'Winget installation command completed.';`,
-  ].join(' ');
-
-  await runPowerShellCommand(installScript, {
-    logPrefix: 'Winget',
-    streamStdout: true,
-    streamStderr: true,
-  });
-
-  await reloadProcessPathFromSystem();
-  const installed = await isWingetInstalled();
-  if (!installed) {
-    throw new Error('Da chay cai dat App Installer nhung van khong tim thay winget sau khi cai dat.');
-  }
-
-  sendLog('[Install] Da cai winget thanh cong.');
-  return {
-    installed: true,
-    method: 'app-installer',
-    vcLibsPath,
-    bundlePath,
-    vcLibsUrl,
-    bundleUrl,
-  };
-}
-
-async function installNodeWithoutWinget() {
-  const downloadUrl = await resolveLatestNodeMsiUrl();
-  const installerPath = getPrereqInstallerPath('node-lts-x64.msi');
-  await downloadFile(downloadUrl, installerPath, 'Node.js 24 LTS');
-
-  sendLog('[Install] Dang cai Node.js 24 LTS bang MSI...');
-  await runProcessCommand('msiexec.exe', ['/i', installerPath, '/qn', '/norestart'], {
-    logPrefix: 'Node.js 24 LTS',
-    streamStdout: true,
-    streamStderr: true,
-  });
-
-  await reloadProcessPathFromSystem();
-  const installedMajor = await getInstalledNodeMajorVersion();
-  if (installedMajor === null || installedMajor < 24) {
-    throw new Error('Da chay installer Node.js nhung khong phat hien duoc Node.js 24+ sau khi cai dat.');
-  }
-
-  return { method: 'direct-download', installerPath, downloadUrl };
-}
-
-async function installGitWithoutWinget() {
-  const downloadUrl = 'https://github.com/git-for-windows/git/releases/latest/download/Git-64-bit.exe';
-  const installerPath = getPrereqInstallerPath('git-64-bit.exe');
-  await downloadFile(downloadUrl, installerPath, 'Git');
-
-  sendLog('[Install] Dang cai Git bang installer chinh thuc...');
-  await runProcessCommand(installerPath, ['/VERYSILENT', '/NORESTART', '/NOCANCEL', '/SP-'], {
-    logPrefix: 'Git',
-    streamStdout: true,
-    streamStderr: true,
-  });
-
-  await reloadProcessPathFromSystem();
-  const installed = await isGitInstalled();
-  if (!installed) {
-    throw new Error('Da chay installer Git nhung van khong tim thay git --version sau khi cai dat.');
-  }
-
-  return { method: 'direct-download', installerPath, downloadUrl };
-}
-
-async function installPackageWithoutWinget(pkg) {
-  if (pkg.id === 'OpenJS.NodeJS.LTS') {
-    return installNodeWithoutWinget();
-  }
-
-  if (pkg.id === 'Git.Git') {
-    return installGitWithoutWinget();
-  }
-
-  throw new Error(`Chua co fallback installer cho prerequisite ${pkg.label}`);
 }
 
 async function installWingetPackage(packageId, label) {
@@ -982,38 +962,23 @@ async function ensureInstallPrerequisites() {
     return { installed: [], alreadySatisfied: true };
   }
 
-  let wingetInstalled = await isWingetInstalled();
-  let wingetInstallResult = null;
-  if (!wingetInstalled) {
-    try {
-      wingetInstallResult = await installWingetIfMissing();
-      wingetInstalled = await isWingetInstalled();
-    } catch (error) {
-      const errorMessage = error instanceof Error ? error.message : String(error);
-      sendLog(`[Install] Cai winget khong thanh cong: ${errorMessage}`);
-      sendLog('[Install] Se dung fallback installer chinh thuc cho Node.js/Git.');
-    }
+  if (!await isWingetInstalled()) {
+    throw new Error('Khong tim thay winget de cai Node.js/Git tu dong. Hay cai winget hoac tu cai dat prerequisite truoc.');
   }
 
   sendLog(`[Install] Thieu prerequisite: ${missingPackages.map(pkg => `${pkg.label} (${pkg.reason})`).join(', ')}`);
 
   const installedPackages = [];
   for (const pkg of missingPackages) {
-    if (wingetInstalled) {
-      const output = await installWingetPackage(pkg.id, pkg.label);
-      installedPackages.push({ ...pkg, output, installMethod: wingetInstallResult?.installed ? 'winget-after-install' : 'winget', wingetInstallResult });
-      continue;
-    }
-
-    const fallbackResult = await installPackageWithoutWinget(pkg);
-    installedPackages.push({ ...pkg, output: null, installMethod: fallbackResult.method, ...fallbackResult });
+    const output = await installWingetPackage(pkg.id, pkg.label);
+    installedPackages.push({ ...pkg, output });
   }
 
   return { installed: installedPackages, alreadySatisfied: false };
 }
 
 async function ensureOpenClawPathForCurrentSession() {
-  await ensurePrerequisitePathsForCurrentSession();
+  await reloadProcessPathFromSystem();
 
   try {
     const { stdout } = await runProcessCommand('cmd.exe', ['/d', '/c', 'npm.cmd', 'config', 'get', 'prefix'], {
@@ -1152,7 +1117,16 @@ async function runOpenClawCli(args, options = {}) {
 }
 
 async function configureOpenClawAfterInstall(params = {}) {
-  const provider = normalizeProvider(params.provider) || 'openrouter';
+  const providerState = await getDesiredProviderState(params, fs.existsSync(getOpenClawConfigPath()) ? readJsonFile(getOpenClawConfigPath()) : null);
+  if (providerState.error) {
+    throw new Error(providerState.error);
+  }
+
+  if (providerState.warning) {
+    sendLog(`[Install] ${providerState.warning}`);
+  }
+
+  const provider = providerState.primaryProvider || normalizeProvider(params.provider) || 'openrouter';
   const providerConfig = PROVIDER_CONFIG[provider];
   const geminiApiKey = String(params.geminiApiKey || '').trim();
   const openrouterApiKey = String(params.openrouterApiKey || '').trim();
@@ -1187,6 +1161,7 @@ async function configureOpenClawAfterInstall(params = {}) {
       'gemini-api-key',
       '--gemini-api-key',
       geminiApiKey,
+      '--skip-health',
       '--skip-daemon',
       '--skip-ui',
       '--skip-channels',
@@ -1283,8 +1258,11 @@ async function configureOpenClawAfterInstall(params = {}) {
     openrouterApiKey,
     telegramBotToken,
   });
+  if (reconciled.warning) {
+    sendLog(`[Install] ${reconciled.warning}`);
+  }
   if (reconciled.modelChanged) {
-    sendLog(`[Install] Da sua ${reconciled.configPath} ve model ${providerConfig.model}`);
+    sendLog(`[Install] Da sua ${reconciled.configPath} ve model ${PROVIDER_CONFIG[reconciled.provider || provider].model}`);
   }
   if (reconciled.toolsChanged) {
     sendLog('[Install] Da dong bo tools.exec.ask=off, tools.exec.security=full, tools.profile=full');
@@ -1498,6 +1476,9 @@ async function handleSaveKeys(params = {}) {
   await saveKeys(saveParams);
   sendLog('[Config] Dang luu key va dong bo cau hinh OpenClaw...');
   const reconciled = await reconcileOpenClawConfigState(saveParams);
+  if (reconciled.warning) {
+    sendLog(`[Config] ${reconciled.warning}`);
+  }
   const savedProviders = [];
   if (saveParams.openrouterApiKey) {
     savedProviders.push('OpenRouter');
