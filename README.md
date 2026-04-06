@@ -31,6 +31,23 @@ Nếu không truyền path và password, file `.bat` sẽ tự dùng cert mặc 
 
 File build sẽ nằm trong thư mục `release/`.
 
+## Build và upload GitHub Release
+
+1. Tăng `version` trong `package.json` nếu cần.
+2. Bảo đảm `git` đã có quyền push `origin` và `git credential` đang lưu token GitHub hợp lệ.
+3. Chạy `npm run release:publish`
+4. Nếu muốn build signed rồi upload luôn, chạy `npm run release:publish:signed`
+
+Script sẽ tự:
+
+- build bản Windows mới
+- dùng tag `v<version>` theo `package.json`
+- push tag đó lên `origin` nếu chưa có
+- tạo hoặc cập nhật GitHub Release tương ứng
+- upload các file trong `release/`: `.exe`, `.blockmap`, `latest.yml`
+
+Nếu chỉ muốn upload lại asset cho version hiện tại mà không build lại, chạy `npm run release:upload`.
+
 Nếu build signed trên Windows bị lỗi liên quan tới `winCodeSign` hoặc `Cannot create symbolic link`, hãy chạy PowerShell bằng quyền Administrator hoặc bật Windows Developer Mode trước khi build.
 
 Lưu ý: chữ ký số giúp giảm cảnh báo SmartScreen/antivirus, nhưng không bảo đảm hết cảnh báo ngay lập tức. Muốn uy tín tốt hơn trên Windows thường cần chứng thư code signing hợp lệ, tốt nhất là EV certificate hoặc certificate có reputation đủ lâu.

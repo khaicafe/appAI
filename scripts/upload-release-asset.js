@@ -3,8 +3,10 @@ const path = require('node:path');
 const https = require('node:https');
 const { execFileSync } = require('node:child_process');
 
+const repoRoot = path.resolve(__dirname, '..');
+
 function runGit(args, options = {}) {
-  return execFileSync('git', ['-C', path.resolve(__dirname, '..'), ...args], {
+  return execFileSync('git', ['-C', repoRoot, ...args], {
     encoding: 'utf8',
     stdio: ['pipe', 'pipe', 'pipe'],
     ...options,
@@ -19,7 +21,7 @@ function normalizeAssetName(name) {
   return String(name || '').trim().toLowerCase().replace(/[ .]+/g, '.');
 }
 
-function getRemoteInfo() {
+function parseRemote() {
   const remoteUrl = runGit(['remote', 'get-url', 'origin']);
   const match = remoteUrl.match(/github\.com[:/]([^/]+)\/([^/.]+)(?:\.git)?$/i);
   if (!match) {
@@ -90,7 +92,7 @@ function requestJson(method, url, token, body = null) {
   });
 }
 
-function uploadAsset(uploadUrl, assetPath, assetName, token) {
+function uploadAsset(uploadUrl, assetPath, token) {
   return new Promise((resolve, reject) => {
     const stat = fs.statSync(assetPath);
     const request = https.request(uploadUrl, {
@@ -130,73 +132,86 @@ async function listReleaseAssets(apiBase, releaseId, token) {
   return requestJson('GET', `${apiBase}/releases/${releaseId}/assets?per_page=100`, token);
 }
 
-async function main() {
-  const assetPath = path.resolve(process.argv[2] || path.join(__dirname, '..', 'release', 'OpenClaw Controller-0.1.0-win-x64.exe'));
-  const tag = process.argv[3] || 'v0.1.0';
-
-  if (!fs.existsSync(assetPath)) {
-    throw new Error(`Asset file not found: ${assetPath}`);
-  }
-
-  const { owner, repo } = getRemoteInfo();
-  const token = getGitHubToken();
-  const apiBase = `https://api.github.com/repos/${owner}/${repo}`;
-
-  let release;
+async function ensureRelease(apiBase, token, tag, body, targetCommitish) {
   try {
-    release = await requestJson('GET', `${apiBase}/releases/tags/${encodeURIComponent(tag)}`, token);
+    return await requestJson('GET', `${apiBase}/releases/tags/${encodeURIComponent(tag)}`, token);
   } catch (error) {
     if (error.statusCode !== 404) {
       throw error;
     }
 
-    release = await requestJson('POST', `${apiBase}/releases`, token, {
+    return requestJson('POST', `${apiBase}/releases`, token, {
       tag_name: tag,
+      target_commitish: targetCommitish,
       name: tag,
       draft: false,
       prerelease: false,
       generate_release_notes: false,
-      body: `Release ${tag} for OpenClaw Controller.`,
+      body,
     });
   }
+}
 
-  const assetName = path.basename(assetPath);
-  let existingAssets = await listReleaseAssets(apiBase, release.id, token);
-  console.log(`EXISTING_ASSETS=${existingAssets.map((asset) => `${asset.name}:${asset.state}`).join('|')}`);
-  for (const asset of existingAssets || []) {
-    if (normalizeAssetName(asset.name) === normalizeAssetName(assetName)) {
-      console.log(`DELETING_ASSET=${asset.name}:${asset.id}`);
-      await requestJson('DELETE', `${apiBase}/releases/assets/${asset.id}`, token);
-    }
+async function uploadReleaseAssets(options) {
+  const tag = options.tag;
+  const files = options.files.map((filePath) => path.resolve(repoRoot, filePath));
+  const missingFiles = files.filter((filePath) => !fs.existsSync(filePath));
+  if (missingFiles.length > 0) {
+    throw new Error(`Asset file not found: ${missingFiles.join(', ')}`);
   }
-  await delay(1500);
 
-  const uploadUrl = release.upload_url.replace('{?name,label}', `?name=${encodeURIComponent(assetName)}`);
-  try {
-    await uploadAsset(uploadUrl, assetPath, assetName, token);
-  } catch (error) {
-    if (!String(error.message || '').includes('already_exists')) {
-      throw error;
-    }
+  const { owner, repo } = parseRemote();
+  const token = getGitHubToken();
+  const apiBase = `https://api.github.com/repos/${owner}/${repo}`;
+  const targetCommitish = options.targetCommitish || runGit(['rev-parse', 'HEAD']);
+  const release = await ensureRelease(apiBase, token, tag, options.body, targetCommitish);
 
-    existingAssets = await listReleaseAssets(apiBase, release.id, token);
-    console.log(`REFRESHED_ASSETS=${existingAssets.map((asset) => `${asset.name}:${asset.state}`).join('|')}`);
+  for (const filePath of files) {
+    const assetName = path.basename(filePath);
+    let existingAssets = await listReleaseAssets(apiBase, release.id, token);
     for (const asset of existingAssets || []) {
       if (normalizeAssetName(asset.name) === normalizeAssetName(assetName)) {
-        console.log(`REDELETING_ASSET=${asset.name}:${asset.id}`);
         await requestJson('DELETE', `${apiBase}/releases/assets/${asset.id}`, token);
+        await delay(1500);
       }
     }
 
-    await delay(1500);
-    await uploadAsset(uploadUrl, assetPath, assetName, token);
+    const uploadUrl = release.upload_url.replace('{?name,label}', `?name=${encodeURIComponent(assetName)}`);
+    await uploadAsset(uploadUrl, filePath, token);
+    console.log(`UPLOADED_ASSET=${assetName}`);
   }
 
-  console.log(`RELEASE_URL=https://github.com/${owner}/${repo}/releases/tag/${tag}`);
-  console.log(`UPLOADED_ASSET=${assetName}`);
+  const releaseUrl = `https://github.com/${owner}/${repo}/releases/tag/${tag}`;
+  console.log(`RELEASE_URL=${releaseUrl}`);
+  return releaseUrl;
 }
 
-main().catch((error) => {
-  console.error(error.message || String(error));
-  process.exit(1);
-});
+async function main() {
+  const packageJson = JSON.parse(fs.readFileSync(path.join(repoRoot, 'package.json'), 'utf8'));
+  const version = packageJson.version;
+  const tag = process.argv[2] || `v${version}`;
+  const files = process.argv.slice(3);
+  const defaultFiles = [
+    `release/OpenClaw Controller-${version}-win-x64.exe`,
+    `release/OpenClaw Controller-${version}-win-x64.exe.blockmap`,
+    'release/latest.yml',
+  ];
+
+  const releaseUrl = await uploadReleaseAssets({
+    tag,
+    files: files.length > 0 ? files : defaultFiles,
+    body: `Release ${tag} for OpenClaw Controller.`,
+  });
+  console.log(`DONE=${releaseUrl}`);
+}
+
+if (require.main === module) {
+  main().catch((error) => {
+    console.error(error.message || String(error));
+    process.exit(1);
+  });
+}
+
+module.exports = {
+  uploadReleaseAssets,
+};

@@ -7,7 +7,10 @@
   "scripts": {
     "start": "electron .",
     "dist:win": "electron-builder --win nsis --x64",
-    "dist:win:signed": "node scripts/build-signed-win.js"
+    "dist:win:signed": "node scripts/build-signed-win.js",
+    "release:upload": "node scripts/upload-release-asset.js",
+    "release:publish": "node scripts/build-and-publish-release.js",
+    "release:publish:signed": "node scripts/build-and-publish-release.js --signed"
   },
   "devDependencies": {
     "electron": "^29.0.0",
