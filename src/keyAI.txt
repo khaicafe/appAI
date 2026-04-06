@@ -1,4 +1,4 @@
 openrouter
-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
+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
 gemini
 AIzaSyCUyy-Q1ffINzmk0484cQtiGhOADhGrdgA
