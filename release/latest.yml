@@ -1,8 +1,8 @@
-version: 0.1.4
+version: 0.1.5
 files:
-  - url: OpenClaw-Controller-0.1.4-win-x64.exe
-    sha512: l78Ept6D3u2qLJAIfMrK9t5zYSU2YbHYZMxO1th1YU8m6sLoi0uwYE8boaSTUg11iVceNNLy9idyk+6LBoMSoQ==
-    size: 80240640
-path: OpenClaw-Controller-0.1.4-win-x64.exe
-sha512: l78Ept6D3u2qLJAIfMrK9t5zYSU2YbHYZMxO1th1YU8m6sLoi0uwYE8boaSTUg11iVceNNLy9idyk+6LBoMSoQ==
-releaseDate: '2026-04-06T07:34:31.783Z'
+  - url: OpenClaw-Controller-0.1.5-win-x64.exe
+    sha512: 3Qa7CBzq5BViUehar+lbptvnNOUohLRQSZgT5amLFUBfj0F4zMUxr2LVBWNFiwx4w+g0ru1xfwiG2kf+uN8ytg==
+    size: 80242040
+path: OpenClaw-Controller-0.1.5-win-x64.exe
+sha512: 3Qa7CBzq5BViUehar+lbptvnNOUohLRQSZgT5amLFUBfj0F4zMUxr2LVBWNFiwx4w+g0ru1xfwiG2kf+uN8ytg==
+releaseDate: '2026-04-06T14:59:06.707Z'
