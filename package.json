@@ -1,6 +1,6 @@
 {
   "name": "openclaw-controller",
-  "version": "0.1.0",
+  "version": "0.1.3",
   "private": true,
   "description": "Electron app to control OpenClaw",
   "main": "src/main.js",
