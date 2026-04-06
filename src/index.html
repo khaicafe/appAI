@@ -70,6 +70,10 @@
       display: block;
       min-width: 0;
     }
+    #chatTabPanel.is-active {
+      display: grid;
+      min-width: 0;
+    }
     #controllerTabPanel.is-active {
       display: flex;
       flex-direction: column;
@@ -85,6 +89,129 @@
     .tab-content-shell h2 {
       margin: 0 0 16px;
       font-size: 1.15rem;
+    }
+    .model-panel {
+      display: grid;
+      gap: 16px;
+    }
+    .chat-shell {
+      display: grid;
+      gap: 16px;
+      min-width: 0;
+    }
+    .chat-toolbar {
+      display: flex;
+      gap: 12px;
+      align-items: center;
+      flex-wrap: wrap;
+    }
+    .chat-toolbar button {
+      width: auto;
+      min-width: 180px;
+      margin: 0;
+    }
+    .chat-note {
+      color: #94a3b8;
+      font-size: 13px;
+      line-height: 1.5;
+      margin: 0;
+    }
+    .chat-frame-shell {
+      min-height: 520px;
+      border-radius: 14px;
+      border: 1px solid #2b2b2b;
+      background: #0d0d0d;
+      overflow: hidden;
+      position: relative;
+    }
+    #openclawChatHost {
+      position: absolute;
+      inset: 0;
+      display: block;
+      min-height: 520px;
+    }
+    .chat-placeholder {
+      position: absolute;
+      inset: 0;
+      display: grid;
+      place-items: center;
+      padding: 28px;
+      background: linear-gradient(180deg, rgba(9, 9, 11, 0.92), rgba(15, 23, 42, 0.96));
+      text-align: center;
+    }
+    .chat-placeholder[hidden] {
+      display: none;
+    }
+    .chat-placeholder-copy {
+      display: grid;
+      gap: 12px;
+      max-width: 520px;
+    }
+    .chat-placeholder-copy h3 {
+      margin: 0;
+      font-size: 1.1rem;
+      color: #f8fafc;
+    }
+    .chat-placeholder-copy p {
+      margin: 0;
+      color: #cbd5e1;
+      line-height: 1.6;
+      font-size: 0.96rem;
+    }
+    .chat-placeholder-copy button {
+      margin: 0;
+    }
+    .model-card {
+      padding: 16px;
+      border-radius: 12px;
+      border: 1px solid #2b2b2b;
+      background: #101010;
+      display: grid;
+      gap: 12px;
+    }
+    .model-card h3 {
+      margin: 0;
+      font-size: 0.98rem;
+      color: #e2e8f0;
+    }
+    .model-meta {
+      display: grid;
+      gap: 6px;
+      color: #cbd5e1;
+      font-size: 0.93rem;
+    }
+    .model-meta strong {
+      color: #f8fafc;
+    }
+    .model-warning {
+      padding: 12px 14px;
+      border-radius: 10px;
+      border: 1px solid #9a3412;
+      background: #2a1b0f;
+      color: #fdba74;
+      font-size: 13px;
+      line-height: 1.5;
+    }
+    .model-warning[hidden] {
+      display: none;
+    }
+    .model-actions {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 12px;
+    }
+    .model-empty {
+      color: #94a3b8;
+      font-size: 13px;
+      line-height: 1.5;
+    }
+    .model-empty[hidden] {
+      display: none;
+    }
+    @media (max-width: 768px) {
+      .model-actions {
+        grid-template-columns: 1fr;
+      }
     }
     .button-stack {
       display: flex;
@@ -389,13 +516,35 @@
         </div>
       </div>
       <div class="tab-list" role="tablist" aria-label="OpenClaw sections">
+        <button id="chatTabButton" class="tab-button" type="button" role="tab" aria-selected="false" aria-controls="chatTabPanel">Chat</button>
         <button id="controllerTabButton" class="tab-button is-active" type="button" role="tab" aria-selected="true" aria-controls="controllerTabPanel">Controller</button>
         <button id="configTabButton" class="tab-button" type="button" role="tab" aria-selected="false" aria-controls="configTabPanel">Cấu hình key</button>
+        <button id="modelTabButton" class="tab-button" type="button" role="tab" aria-selected="false" aria-controls="modelTabPanel">AI model</button>
         <button id="guideTabButton" class="tab-button" type="button" role="tab" aria-selected="false" aria-controls="guideTabPanel">Hướng dẫn</button>
       </div>
     </div>
     <div class="content">
       <div class="tab-content-shell">
+        <section id="chatTabPanel" class="tab-panel" role="tabpanel" aria-labelledby="chatTabButton">
+          <h2>OpenClaw Chat</h2>
+          <div class="chat-shell">
+            <div class="chat-toolbar">
+              <button id="reloadChatButton" class="secondary" type="button">Tải lại chat</button>
+              <button id="openChatExternallyButton" type="button" style="background: #1d4ed8;">Mở chat ngoài app</button>
+            </div>
+            <p class="chat-note">Tab này nhúng dashboard/chat của OpenClaw từ `http://localhost:18789/`. Nếu gateway chưa chạy, app sẽ hiện nút chạy gateway ngay trong tab này.</p>
+            <div class="chat-frame-shell">
+              <div id="openclawChatHost" aria-hidden="true"></div>
+              <div id="chatPlaceholder" class="chat-placeholder">
+                <div class="chat-placeholder-copy">
+                  <h3>Gateway chưa sẵn sàng</h3>
+                  <p id="chatPlaceholderMessage">Hãy chạy Gateway để mở màn chat OpenClaw ngay trong app.</p>
+                  <button id="chatRunGatewayButton" type="button" style="background: #0f766e;">Chạy Gateway để mở chat</button>
+                </div>
+              </div>
+            </div>
+          </div>
+        </section>
         <section id="controllerTabPanel" class="tab-panel is-active" role="tabpanel" aria-labelledby="controllerTabButton">
           <h2>Controller</h2>
           <div class="button-stack">
@@ -512,6 +661,52 @@
               </span>
             </span>
           </button>
+        </section>
+        <section id="modelTabPanel" class="tab-panel" role="tabpanel" aria-labelledby="modelTabButton">
+          <h2>AI model</h2>
+          <div class="model-panel">
+            <div class="model-card">
+              <h3>Model mặc định hiện tại</h3>
+              <div class="model-meta">
+                <div><strong id="currentModelLabel">Chưa có</strong></div>
+                <div id="currentModelProvider">Provider: N/A</div>
+              </div>
+              <div id="modelWarning" class="model-warning" hidden></div>
+            </div>
+            <div class="model-card">
+              <h3>Chọn model mặc định</h3>
+              <div class="field-group">
+                <label for="defaultModelSelect">Danh sách model từ OpenClaw</label>
+                <select id="defaultModelSelect">
+                  <option value="">Đang tải danh sách model...</option>
+                </select>
+                <div class="field-hint">App sẽ đọc `agents.defaults.models` trong OpenClaw config và cập nhật `agents.defaults.model.primary` khi bạn lưu.</div>
+              </div>
+              <div id="modelEmptyState" class="model-empty" hidden>Chưa có model nào trong cấu hình OpenClaw. Hãy cài hoặc lưu key trước.</div>
+              <div class="model-actions">
+                <button id="refreshModelsButton" class="secondary">
+                  <span class="button-face">
+                    <span id="refreshModelsButtonLabel">Tải lại danh sách</span>
+                    <span class="loading-dots" aria-hidden="true">
+                      <span></span>
+                      <span></span>
+                      <span></span>
+                    </span>
+                  </span>
+                </button>
+                <button id="setDefaultModelButton" style="background: #0f766e;">
+                  <span class="button-face">
+                    <span id="setDefaultModelButtonLabel">Đặt model mặc định</span>
+                    <span class="loading-dots" aria-hidden="true">
+                      <span></span>
+                      <span></span>
+                      <span></span>
+                    </span>
+                  </span>
+                </button>
+              </div>
+            </div>
+          </div>
         </section>
         <section id="guideTabPanel" class="tab-panel" role="tabpanel" aria-labelledby="guideTabButton">
           <h2>Hướng dẫn kết nối bot</h2>

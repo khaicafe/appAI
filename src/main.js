@@ -1,5 +1,5 @@
 const path = require('node:path');
-const { app, BrowserWindow, ipcMain, shell } = require('electron');
+const { app, BrowserWindow, BrowserView, ipcMain, shell } = require('electron');
 const { fork, spawn } = require('child_process');
 const fs = require('fs');
 const http = require('http');
@@ -12,11 +12,14 @@ let gatewayReady = false;
 let gatewayInfo = {};
 let gatewayDashboardOpened = false;
 let gatewayDashboardRefreshTimer = null;
+let chatBrowserView = null;
 
 const gatewayDashboardUrl = 'http://localhost:18789/';
+const gatewayDashboardOrigin = 'http://localhost:18789';
 const OPENCLAW_GEMINI_FLASH_MODEL = 'google/gemini-2.5-flash';
 const OPENCLAW_GOOGLE_PROFILE_ID = 'google:default';
 const OPENCLAW_OPENROUTER_MODEL = 'openrouter/qwen/qwen3.6-plus:free';
+const OPENCLAW_OPENROUTER_NEMOTRON_MODEL = 'openrouter/nvidia/nemotron-3-super-120b-a12b:free';
 const OPENROUTER_API_MODEL = OPENCLAW_OPENROUTER_MODEL.replace(/^openrouter\//, '');
 const OPENCLAW_OPENROUTER_PROFILE_ID = 'openrouter:default';
 const TELEGRAM_MEDIA_MAX_MB = 100;
@@ -50,6 +53,7 @@ const PROVIDER_CONFIG = {
     modelEntries: {
       'openrouter/auto': { alias: 'OpenRouter' },
       [OPENCLAW_OPENROUTER_MODEL]: { alias: 'OpenRouter Free' },
+      [OPENCLAW_OPENROUTER_NEMOTRON_MODEL]: { alias: 'Nemotron 3 Super Free' },
     },
   },
 };
@@ -67,6 +71,80 @@ function parseJsonSafe(value) {
   } catch (_error) {
     return null;
   }
+}
+
+function detectProviderFromModel(modelName) {
+  const normalizedModelName = String(modelName || '').trim().toLowerCase();
+  if (!normalizedModelName) {
+    return null;
+  }
+
+  if (normalizedModelName.startsWith('openrouter/')) {
+    return 'openrouter';
+  }
+
+  if (normalizedModelName.startsWith('google/') || normalizedModelName.startsWith('gemini')) {
+    return 'gemini';
+  }
+
+  return null;
+}
+
+function getCurrentPrimaryModel(config = null) {
+  const primaryModel = config?.agents?.defaults?.model?.primary;
+  return typeof primaryModel === 'string' && primaryModel.trim() ? primaryModel.trim() : null;
+}
+
+function sortModelEntries(entries = {}) {
+  return Object.entries(entries).sort(([leftName, leftConfig], [rightName, rightConfig]) => {
+    const leftLabel = String(leftConfig?.alias || leftName).toLowerCase();
+    const rightLabel = String(rightConfig?.alias || rightName).toLowerCase();
+    return leftLabel.localeCompare(rightLabel) || leftName.localeCompare(rightName);
+  });
+}
+
+function resolvePrimaryProvider({
+  preferredProvider = null,
+  detectedProvider = null,
+  hasGemini = false,
+  hasOpenRouter = false,
+  openrouterAuthFailed = false,
+}) {
+  const availableProviders = [];
+  if (hasOpenRouter && !openrouterAuthFailed) {
+    availableProviders.push('openrouter');
+  }
+  if (hasGemini) {
+    availableProviders.push('gemini');
+  }
+
+  for (const candidate of [preferredProvider, detectedProvider]) {
+    if (candidate && availableProviders.includes(candidate)) {
+      return candidate;
+    }
+  }
+
+  return availableProviders[0] || null;
+}
+
+function selectPrimaryModel({ preferredModel = null, currentPrimaryModel = null, availableModels = {}, fallbackProvider = null }) {
+  for (const candidate of [preferredModel, currentPrimaryModel]) {
+    if (candidate && Object.prototype.hasOwnProperty.call(availableModels, candidate)) {
+      const provider = detectProviderFromModel(candidate);
+      if (!fallbackProvider || !provider || provider === fallbackProvider) {
+        return candidate;
+      }
+    }
+  }
+
+  if (fallbackProvider) {
+    const providerConfig = PROVIDER_CONFIG[fallbackProvider];
+    if (providerConfig && Object.prototype.hasOwnProperty.call(availableModels, providerConfig.model)) {
+      return providerConfig.model;
+    }
+  }
+
+  return Object.keys(availableModels)[0] || null;
 }
 
 function isOpenRouterAuthFailure(status, message = '') {
@@ -141,6 +219,86 @@ function resetGatewayState() {
     gatewayDashboardRefreshTimer = null;
   }
   gatewayProcess = null;
+}
+
+function ensureChatBrowserView() {
+  if (chatBrowserView && !chatBrowserView.webContents.isDestroyed()) {
+    return chatBrowserView;
+  }
+
+  chatBrowserView = new BrowserView({
+    webPreferences: {
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true,
+    },
+  });
+
+  chatBrowserView.setBackgroundColor('#ffffff');
+  chatBrowserView.webContents.setWindowOpenHandler(({ url }) => {
+    shell.openExternal(url).catch(() => null);
+    return { action: 'deny' };
+  });
+
+  chatBrowserView.webContents.on('will-navigate', (event, url) => {
+    if (url.startsWith(gatewayDashboardOrigin)) {
+      return;
+    }
+
+    event.preventDefault();
+    shell.openExternal(url).catch(() => null);
+  });
+
+  return chatBrowserView;
+}
+
+async function showEmbeddedChat(bounds = {}, options = {}) {
+  if (!mainWindow || mainWindow.isDestroyed()) {
+    throw new Error('Main window chua san sang.');
+  }
+
+  const view = ensureChatBrowserView();
+  const width = Math.max(0, Number(bounds.width) || 0);
+  const height = Math.max(0, Number(bounds.height) || 0);
+  if (width === 0 || height === 0) {
+    throw new Error('Khung chat chua co kich thuoc hop le.');
+  }
+
+  const nextBounds = {
+    x: Math.max(0, Number(bounds.x) || 0),
+    y: Math.max(0, Number(bounds.y) || 0),
+    width,
+    height,
+  };
+
+  if (!mainWindow.getBrowserViews().includes(view)) {
+    mainWindow.addBrowserView(view);
+  }
+
+  mainWindow.setTopBrowserView(view);
+  view.setBounds(nextBounds);
+  view.setAutoResize({ width: true, height: true });
+
+  const shouldReload = options?.forceReload === true || view.webContents.getURL() !== gatewayDashboardUrl;
+  if (shouldReload) {
+    await view.webContents.loadURL(options?.forceReload ? `${gatewayDashboardUrl}?t=${Date.now()}` : gatewayDashboardUrl);
+  }
+
+  return { status: 'ok' };
+}
+
+function hideEmbeddedChat() {
+  if (!mainWindow || mainWindow.isDestroyed() || !chatBrowserView) {
+    return { status: 'ok' };
+  }
+
+  try {
+    mainWindow.removeBrowserView(chatBrowserView);
+  } catch (_error) {
+    return { status: 'ok' };
+  }
+
+  return { status: 'ok' };
 }
 
 function focusExistingMainWindow() {
@@ -637,27 +795,34 @@ async function getDesiredProviderState(existingConfig = null, options = {}) {
   const savedKeys = await getSavedKeys().catch(() => null);
   const explicitProvider = normalizeProvider(options.provider);
   const detectedProvider = detectProviderFromConfig(existingConfig || {});
+  const preferredModel = typeof options.preferredModel === 'string' && options.preferredModel.trim()
+    ? options.preferredModel.trim()
+    : null;
+  const currentPrimaryModel = getCurrentPrimaryModel(existingConfig);
+  const preferredProvider = detectProviderFromModel(preferredModel || currentPrimaryModel) || explicitProvider || detectedProvider;
   const hasOpenRouter = hasProviderSignal('openrouter', existingConfig, savedKeys);
   const hasGemini = hasProviderSignal('gemini', existingConfig, savedKeys);
   const openrouterApiKey = hasOpenRouter ? getEffectiveApiKeyForProvider('openrouter', options, savedKeys) : null;
   const openrouterValidation = openrouterApiKey ? await validateOpenRouterChatAccess(openrouterApiKey) : null;
   const openrouterAuthFailed = Boolean(openrouterValidation && !openrouterValidation.ok && openrouterValidation.reason === 'auth');
+  const authProviders = [
+    ...(hasGemini ? ['gemini'] : []),
+    ...(hasOpenRouter ? ['openrouter'] : []),
+  ];
+  const modelProviders = authProviders.length > 0 ? authProviders : (preferredProvider ? [preferredProvider] : []);
+  const primaryProvider = resolvePrimaryProvider({
+    preferredProvider,
+    detectedProvider,
+    hasGemini,
+    hasOpenRouter,
+    openrouterAuthFailed,
+  });
 
-  if (hasOpenRouter && !openrouterAuthFailed) {
+  if (primaryProvider) {
     return {
-      primaryProvider: 'openrouter',
-      authProviders: hasGemini ? ['gemini', 'openrouter'] : ['openrouter'],
-      modelProviders: ['gemini', 'openrouter'],
-      savedKeys,
-      warning: null,
-    };
-  }
-
-  if (hasGemini) {
-    return {
-      primaryProvider: 'gemini',
-      authProviders: hasOpenRouter ? ['gemini', 'openrouter'] : ['gemini'],
-      modelProviders: hasOpenRouter ? ['gemini', 'openrouter'] : ['gemini'],
+      primaryProvider,
+      authProviders,
+      modelProviders,
       savedKeys,
       warning: openrouterAuthFailed
         ? `OpenRouter API key khong dung duoc cho chat (${openrouterValidation.message}). Da chuyen sang Gemini.`
@@ -759,7 +924,6 @@ async function reconcileOpenClawConfigState(options = {}) {
     return result;
   }
 
-  const providerConfig = PROVIDER_CONFIG[provider];
   const currentDefaults = config.agents?.defaults || {};
   const currentPrimaryModel = currentDefaults.model?.primary || null;
   const currentModels = currentDefaults.models || {};
@@ -772,6 +936,12 @@ async function reconcileOpenClawConfigState(options = {}) {
     ...preservedModelEntries,
     ...managedModelEntries,
   };
+  const desiredPrimaryModel = selectPrimaryModel({
+    preferredModel: typeof options.preferredModel === 'string' ? options.preferredModel.trim() : null,
+    currentPrimaryModel,
+    availableModels: mergedModelEntries,
+    fallbackProvider: provider,
+  });
   const currentTelegramEnabled = config.channels?.telegram?.enabled === true;
   const currentTelegramBotToken = typeof config.channels?.telegram?.botToken === 'string'
     ? config.channels.telegram.botToken
@@ -801,7 +971,7 @@ async function reconcileOpenClawConfigState(options = {}) {
     ...currentDefaults,
     model: {
       ...(currentDefaults.model || {}),
-      primary: providerConfig.model,
+      primary: desiredPrimaryModel,
     },
     models: mergedModelEntries,
   };
@@ -895,7 +1065,7 @@ async function reconcileOpenClawConfigState(options = {}) {
   }
 
   if (
-    currentPrimaryModel !== providerConfig.model
+    currentPrimaryModel !== desiredPrimaryModel
     || missingModelEntries
     || staleManagedModelsPresent
     || staleManagedConfigProfilesPresent
@@ -919,8 +1089,60 @@ async function reconcileOpenClawConfigState(options = {}) {
   }
 
   result.warning = providerState.warning || null;
+  result.primaryModel = desiredPrimaryModel;
 
   return result;
+}
+
+async function getOpenClawModelState() {
+  const configPath = getOpenClawConfigPath();
+  if (!fs.existsSync(configPath)) {
+    throw new Error(`Khong tim thay file cau hinh OpenClaw: ${configPath}`);
+  }
+
+  const reconciled = await reconcileOpenClawConfigState();
+  const config = readJsonFile(configPath);
+  const models = sortModelEntries(config?.agents?.defaults?.models || {}).map(([name, entry]) => ({
+    name,
+    alias: entry?.alias || null,
+    provider: detectProviderFromModel(name),
+  }));
+
+  return {
+    primaryModel: getCurrentPrimaryModel(config),
+    models,
+    warning: reconciled.warning || null,
+  };
+}
+
+async function setOpenClawDefaultModel(modelName) {
+  const normalizedModelName = String(modelName || '').trim();
+  if (!normalizedModelName) {
+    throw new Error('Chua co model nao duoc chon.');
+  }
+
+  const configPath = getOpenClawConfigPath();
+  if (!fs.existsSync(configPath)) {
+    throw new Error(`Khong tim thay file cau hinh OpenClaw: ${configPath}`);
+  }
+
+  const currentConfig = readJsonFile(configPath);
+  const currentModels = currentConfig?.agents?.defaults?.models || {};
+  const managedModels = buildManagedModelEntries(['gemini', 'openrouter']);
+  if (
+    !Object.prototype.hasOwnProperty.call(currentModels, normalizedModelName)
+    && !Object.prototype.hasOwnProperty.call(managedModels, normalizedModelName)
+  ) {
+    throw new Error(`Model khong ton tai trong OpenClaw config: ${normalizedModelName}`);
+  }
+
+  const reconciled = await reconcileOpenClawConfigState({ preferredModel: normalizedModelName });
+  const state = await getOpenClawModelState();
+  return {
+    message: `Da dat model mac dinh: ${state.primaryModel}`,
+    warning: reconciled.warning || null,
+    state,
+  };
 }
 
 function runPowerShellCommand(command, options = {}) {
@@ -1040,7 +1262,7 @@ async function waitForGatewayHttpReady(timeoutMs = 30000, intervalMs = 1000) {
         mainWindow.webContents.send('gateway-ready', gatewayInfo);
       }
 
-      openGatewayDashboard();
+      // openGatewayDashboard();
       scheduleGatewayDashboardRefresh();
       return true;
     }
@@ -1275,6 +1497,10 @@ app.on('window-all-closed', () => {
 });
 
 app.on('before-quit', () => {
+  if (chatBrowserView && !chatBrowserView.webContents.isDestroyed()) {
+    chatBrowserView.webContents.close({ waitForBeforeUnload: false });
+    chatBrowserView = null;
+  }
   if (logicTaskProcess && !logicTaskProcess.killed) {
     logicTaskProcess.kill();
     logicTaskProcess = null;
@@ -1356,7 +1582,7 @@ ipcMain.handle('openclaw:command', async (_event, command, params) => {
           mainWindow.webContents.send('gateway-ready', gatewayInfo);
         }
 
-        openGatewayDashboard();
+        // openGatewayDashboard();
         scheduleGatewayDashboardRefresh();
         return {
           status: 'ok',
@@ -1413,7 +1639,7 @@ ipcMain.handle('openclaw:command', async (_event, command, params) => {
                 if (mainWindow?.webContents) {
                   mainWindow.webContents.send('gateway-ready', gatewayInfo);
                 }
-                openGatewayDashboard();
+                // openGatewayDashboard();
                 scheduleGatewayDashboardRefresh();
               }
             }
@@ -1572,4 +1798,25 @@ ipcMain.handle('openclaw:command', async (_event, command, params) => {
 
 ipcMain.handle('openclaw:get-app-state', async () => {
   return getAppState();
+});
+
+ipcMain.handle('openclaw:get-model-state', async () => {
+  return getOpenClawModelState();
+});
+
+ipcMain.handle('openclaw:set-default-model', async (_event, modelName) => {
+  return setOpenClawDefaultModel(modelName);
+});
+
+ipcMain.handle('openclaw:open-dashboard', async () => {
+  openGatewayDashboard(true);
+  return { status: 'ok', url: gatewayDashboardUrl };
+});
+
+ipcMain.handle('openclaw:show-embedded-chat', async (_event, bounds, options) => {
+  return showEmbeddedChat(bounds, options);
+});
+
+ipcMain.handle('openclaw:hide-embedded-chat', async () => {
+  return hideEmbeddedChat();
 });

@@ -7,6 +7,7 @@ const { getSavedKeys, saveKeys } = require('./key-store');
 const OPENCLAW_GEMINI_FLASH_MODEL = 'google/gemini-2.5-flash';
 const OPENCLAW_GOOGLE_PROFILE_ID = 'google:default';
 const OPENCLAW_OPENROUTER_MODEL = 'openrouter/qwen/qwen3.6-plus:free';
+const OPENCLAW_OPENROUTER_NEMOTRON_MODEL = 'openrouter/nvidia/nemotron-3-super-120b-a12b:free';
 const OPENROUTER_API_MODEL = OPENCLAW_OPENROUTER_MODEL.replace(/^openrouter\//, '');
 const OPENCLAW_OPENROUTER_PROFILE_ID = 'openrouter:default';
 const TELEGRAM_MEDIA_MAX_MB = 100;
@@ -38,6 +39,7 @@ const PROVIDER_CONFIG = {
     modelEntries: {
       'openrouter/auto': { alias: 'OpenRouter' },
       [OPENCLAW_OPENROUTER_MODEL]: { alias: 'OpenRouter Free' },
+      [OPENCLAW_OPENROUTER_NEMOTRON_MODEL]: { alias: 'Nemotron 3 Super Free' },
     },
   },
 };
@@ -301,6 +303,72 @@ function detectProviderFromConfig(config) {
   return null;
 }
 
+function detectProviderFromModel(modelName) {
+  const normalizedModelName = String(modelName || '').trim().toLowerCase();
+  if (!normalizedModelName) {
+    return null;
+  }
+
+  if (normalizedModelName.startsWith('openrouter/')) {
+    return 'openrouter';
+  }
+
+  if (normalizedModelName.startsWith('google/') || normalizedModelName.startsWith('gemini')) {
+    return 'gemini';
+  }
+
+  return null;
+}
+
+function getCurrentPrimaryModel(config = null) {
+  const primaryModel = config?.agents?.defaults?.model?.primary;
+  return typeof primaryModel === 'string' && primaryModel.trim() ? primaryModel.trim() : null;
+}
+
+function resolvePrimaryProvider({
+  preferredProvider = null,
+  detectedProvider = null,
+  hasGemini = false,
+  hasOpenRouter = false,
+  openrouterAuthFailed = false,
+}) {
+  const availableProviders = [];
+  if (hasOpenRouter && !openrouterAuthFailed) {
+    availableProviders.push('openrouter');
+  }
+  if (hasGemini) {
+    availableProviders.push('gemini');
+  }
+
+  for (const candidate of [preferredProvider, detectedProvider]) {
+    if (candidate && availableProviders.includes(candidate)) {
+      return candidate;
+    }
+  }
+
+  return availableProviders[0] || null;
+}
+
+function selectPrimaryModel({ preferredModel = null, currentPrimaryModel = null, availableModels = {}, fallbackProvider = null }) {
+  for (const candidate of [preferredModel, currentPrimaryModel]) {
+    if (candidate && Object.prototype.hasOwnProperty.call(availableModels, candidate)) {
+      const provider = detectProviderFromModel(candidate);
+      if (!fallbackProvider || !provider || provider === fallbackProvider) {
+        return candidate;
+      }
+    }
+  }
+
+  if (fallbackProvider) {
+    const providerConfig = PROVIDER_CONFIG[fallbackProvider];
+    if (providerConfig && Object.prototype.hasOwnProperty.call(availableModels, providerConfig.model)) {
+      return providerConfig.model;
+    }
+  }
+
+  return Object.keys(availableModels)[0] || null;
+}
+
 function getStoredApiKey(provider) {
   const providerConfig = PROVIDER_CONFIG[provider];
   if (!providerConfig) {
@@ -363,27 +431,33 @@ async function getDesiredProviderState(options = {}, existingConfig = null) {
   const savedKeys = await getSavedKeys().catch(() => null);
   const explicitProvider = normalizeProvider(options.provider);
   const detectedProvider = detectProviderFromConfig(existingConfig || {});
+  const preferredModel = typeof options.preferredModel === 'string' && options.preferredModel.trim()
+    ? options.preferredModel.trim()
+    : null;
+  const currentPrimaryModel = getCurrentPrimaryModel(existingConfig);
+  const preferredProvider = detectProviderFromModel(preferredModel || currentPrimaryModel) || explicitProvider || detectedProvider;
   const hasOpenRouter = hasProviderSignal('openrouter', options, existingConfig, savedKeys);
   const hasGemini = hasProviderSignal('gemini', options, existingConfig, savedKeys);
   const openrouterApiKey = hasOpenRouter ? getEffectiveApiKeyForProvider('openrouter', options, savedKeys) : null;
   const openrouterValidation = openrouterApiKey ? await validateOpenRouterChatAccess(openrouterApiKey) : null;
   const openrouterAuthFailed = Boolean(openrouterValidation && !openrouterValidation.ok && openrouterValidation.reason === 'auth');
+  const activeProviders = [
+    ...(hasGemini ? ['gemini'] : []),
+    ...(hasOpenRouter ? ['openrouter'] : []),
+  ];
+  const primaryProvider = resolvePrimaryProvider({
+    preferredProvider,
+    detectedProvider,
+    hasGemini,
+    hasOpenRouter,
+    openrouterAuthFailed,
+  });
 
-  if (hasOpenRouter && !openrouterAuthFailed) {
+  if (primaryProvider) {
     return {
-      primaryProvider: 'openrouter',
-      authProviders: hasGemini ? ['gemini', 'openrouter'] : ['openrouter'],
-      modelProviders: ['gemini', 'openrouter'],
-      savedKeys,
-      warning: null,
-    };
-  }
-
-  if (hasGemini) {
-    return {
-      primaryProvider: 'gemini',
-      authProviders: hasOpenRouter ? ['gemini', 'openrouter'] : ['gemini'],
-      modelProviders: hasOpenRouter ? ['gemini', 'openrouter'] : ['gemini'],
+      primaryProvider,
+      activeProviders,
+      modelProviders: activeProviders.length > 0 ? activeProviders : (preferredProvider ? [preferredProvider] : []),
       savedKeys,
       warning: openrouterAuthFailed
         ? `OpenRouter API key khong dung duoc cho chat (${openrouterValidation.message}). Da chuyen sang Gemini.`
@@ -532,6 +606,12 @@ async function reconcileOpenClawConfigState(options = {}) {
     ...preservedModelEntries,
     ...managedModelEntries,
   };
+  const desiredPrimaryModel = selectPrimaryModel({
+    preferredModel: typeof options.preferredModel === 'string' ? options.preferredModel.trim() : null,
+    currentPrimaryModel,
+    availableModels: mergedModelEntries,
+    fallbackProvider: primaryProvider,
+  });
   const missingModelEntries = Object.entries(mergedModelEntries).some(([modelName, modelConfig]) => {
     if (!Object.prototype.hasOwnProperty.call(currentModels, modelName)) {
       return true;
@@ -567,7 +647,7 @@ async function reconcileOpenClawConfigState(options = {}) {
     ...currentDefaults,
     model: {
       ...(currentDefaults.model || {}),
-      primary: providerConfig.model,
+      primary: desiredPrimaryModel,
     },
     models: mergedModelEntries,
   };
@@ -616,7 +696,7 @@ async function reconcileOpenClawConfigState(options = {}) {
     };
   }
 
-  const needsConfigUpdate = currentPrimaryModel !== providerConfig.model
+  const needsConfigUpdate = currentPrimaryModel !== desiredPrimaryModel
     || missingModelEntries
     || staleManagedModelsPresent
     || staleManagedConfigProfilesPresent
@@ -638,6 +718,7 @@ async function reconcileOpenClawConfigState(options = {}) {
     result.modelChanged = true;
     result.toolsChanged = true;
     result.provider = primaryProvider;
+    result.primaryModel = desiredPrimaryModel;
     writeJsonFile(configPath, config);
   }
 
@@ -698,6 +779,7 @@ async function reconcileOpenClawConfigState(options = {}) {
   }
 
   result.warning = providerState.warning || null;
+  result.primaryModel = desiredPrimaryModel;
 
   return result;
 }

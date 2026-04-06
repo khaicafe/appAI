@@ -33,6 +33,7 @@ async function main() {
     'google/gemini-2.0-flash': { alias: 'Gemini 2.0 Flash' },
     'openrouter/auto': { alias: 'OpenRouter' },
     'openrouter/qwen/qwen3.6-plus:free': { alias: 'OpenRouter Free' },
+    'openrouter/nvidia/nemotron-3-super-120b-a12b:free': { alias: 'Nemotron 3 Super Free' },
   };
 
   config.auth = config.auth || {};
